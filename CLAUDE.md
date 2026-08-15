@@ -19,3 +19,8 @@
 - 卡图/资源路径相对 `d:/2/解包整理/`；卡牌索引 `解包整理/card_index.json`
 - 视觉识别：用户要求看图时，走 vision skill（MCP 调用副模型），主模型无法直接看图
 - 大文件/资源不动则不动；改动前先备份（用户要求：备份 → 测试 → 通过后删备份）
+## Git 仓库
+
+- **唯一上传目标**：`https://github.com/qjhqjh10/qjh2.git`（remote: origin，分支 master）
+- 涉及 push/commit 一律推送到 origin/master，不要新建/切换其他远程
+- .gitignore 已排除大资源/反编译代码/敏感配置，push 前无需额外处理

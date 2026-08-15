@@ -10,6 +10,11 @@ Warpforge_code/
 # Python 嵌入式环境（144M，工具依赖）
 Warpforge_tools/py312/
 Warpforge_tools/data/
+# 用户提供的大资源目录（PnP 卡面/卡背/卡框/备份，本地保留）
+Warpforge部队卡片/
+Warpforge Cardbacks/
+Warpforge cardframes/
+备份_alpha修复_20260815/
 
 # ===== Python =====
 __pycache__/
