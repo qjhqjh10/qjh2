@@ -1,0 +1,28 @@
+# ===== 大目录/资源文件：不纳入版本控制 =====
+# 游戏本体（1.8G，只读源文件）
+Warhammer 40k Warpforge/
+# 解包资源（6.2G，44.9 万文件；需要时可用工具重新生成）
+解包整理/*
+!解包整理/README.md
+!解包整理/card_index.json
+# 反编译的游戏代码（版权风险，不入库；需要时从本地读取）
+Warpforge_code/
+# Python 嵌入式环境（144M，工具依赖）
+Warpforge_tools/py312/
+Warpforge_tools/data/
+
+# ===== Python =====
+__pycache__/
+*.pyc
+
+# ===== 敏感配置（绝不可入库）=====
+# ~/.claude.json 与 ~/.cc-switch/ 在本仓库之外，禁止拷贝进本仓库
+*.key
+*.pem
+.env
+
+# ===== 系统/编辑器 =====
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
