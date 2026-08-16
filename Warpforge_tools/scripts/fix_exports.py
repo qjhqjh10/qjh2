@@ -9,7 +9,7 @@ import ogg_build as OB
 GAME = r"d:/2/Warhammer 40k Warpforge/Warpforge_Data"
 BUNDLES = os.path.join(GAME, "StreamingAssets", "aa", "StandaloneWindows64")
 OUT = r"d:/2/Warpforge_assets_full"
-OLD = r"d:/2/Warpforge_assets/Assets"
+HARVEST = r"d:/2/解包整理"  # vorbis setup 头收割源 (递归找 .ogg)
 
 def load_files():
     files = []
@@ -21,21 +21,22 @@ def load_files():
             files.append((os.path.join(BUNDLES, fn), "bundle_" + fn))
     return files
 
-# harvest ogg headers: by name and by (ch, rate)
+# harvest ogg headers: by name and by (ch, rate) (递归扫描 HARVEST 根)
 harvest_by_name = {}
 harvest_by_combo = {}
-for fn in os.listdir(OLD):
-    if not fn.endswith(".ogg"):
-        continue
-    try:
-        pkts = OB.parse_ogg_packets(open(os.path.join(OLD, fn), "rb").read())
-        info = OB.vorbis_id_info(pkts[0])
-        if info and len(pkts) >= 3:
-            key = (info[0], info[1])
-            harvest_by_name[os.path.splitext(fn)[0]] = (pkts[0], pkts[1], pkts[2])
-            harvest_by_combo.setdefault(key, (pkts[0], pkts[1], pkts[2]))
-    except Exception:
-        pass
+for dirpath, _, fns in os.walk(HARVEST):
+    for fn in fns:
+        if not fn.endswith(".ogg"):
+            continue
+        try:
+            pkts = OB.parse_ogg_packets(open(os.path.join(dirpath, fn), "rb").read())
+            info = OB.vorbis_id_info(pkts[0])
+            if info and len(pkts) >= 3:
+                key = (info[0], info[1])
+                harvest_by_name[os.path.splitext(fn)[0]] = (pkts[0], pkts[1], pkts[2])
+                harvest_by_combo.setdefault(key, (pkts[0], pkts[1], pkts[2]))
+        except Exception:
+            pass
 print(f"harvest: {len(harvest_by_name)} by name, {len(harvest_by_combo)} combos", flush=True)
 
 def read_streamed_data(obj, env, tt):
@@ -92,6 +93,12 @@ def read_streamed_data(obj, env, tt):
     return None
 
 def main():
+    global OUT, HARVEST
+    for a in sys.argv[1:]:
+        if a.startswith('--out='):
+            OUT = a.split('=', 1)[1]
+        elif a.startswith('--harvest='):
+            HARVEST = a.split('=', 1)[1]
     files = load_files()
     counts = {"png": 0, "obj": 0, "ttf": 0, "mp4": 0, "txt": 0, "ogg": 0, "fail": 0}
     t0 = time.time()
@@ -100,7 +107,7 @@ def main():
         objs = list(env.objects)
         for obj in objs:
             tn = obj.type.name
-            if tn not in ("VideoClip",):
+            if tn not in ("Texture2D", "AudioClip", "Mesh", "Font", "VideoClip", "TextAsset"):
                 continue
             try:
                 outdir = os.path.join(OUT, os.path.splitext(short)[0], tn)

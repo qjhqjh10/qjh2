@@ -40,10 +40,13 @@ def read_streamed_data(obj, env, tt):
             name = "CAB-" + m.group(1) + ".resource"
             f = env.file.files.get(name) if hasattr(env.file, "files") else None
             if f is not None:
-                f.seek(0)
-                data = f.read()
                 off, size = r.get("m_Offset", 0), r.get("m_Size", 0)
-                return data[off:off + size]
+                # EndianBinaryReader 无 seek: 用 Position/read_bytes 兼容
+                if hasattr(f, "seek"):
+                    f.seek(off)
+                    return f.read(size)
+                f.Position = off
+                return f.read_bytes(size)
         # external file path
         path = src.replace("archive:/", "").split("/")[-1]
         full = os.path.join(GAME, path)
@@ -64,7 +67,32 @@ def read_streamed_data(obj, env, tt):
     return None
 
 def handle_audio(obj, env, tt, path_stem):
-    """Export audio: UnityPy direct, then FSB5 streamed path."""
+    """Export audio: embedded (m_AudioData) -> streamed FSB5 -> UnityPy direct fallback."""
+    # 1) 内嵌音频 (m_AudioData): 音效库等无 m_Resource 的 AudioClip
+    raw = tt.get("m_AudioData")
+    if isinstance(raw, (bytes, bytearray)) and raw:
+        try:
+            lay = FA.get_sample_layout(raw)
+            if lay:
+                data = raw[lay["data_offset"]:]
+                if lay["mode"] == 7:  # IMAADPCM
+                    pcm, n = FA.decode_ima(data, lay["channels"], lay["n_samples"])
+                    with open(path_stem + ".wav", "wb") as f:
+                        f.write(FA.pcm_to_wav(pcm, lay["channels"], lay["freq"]))
+                    return "wav"
+                elif lay["mode"] == 15:  # VORBIS packets
+                    pkts = FA.extract_vorbis_packets(data)
+                    with open(path_stem + ".vorbis", "wb") as f:
+                        f.write(b"".join(pkts))
+                    return "vorbis"
+                with open(path_stem + ".bin", "wb") as f:
+                    f.write(raw)
+                return "bin"
+        except Exception:
+            pass
+        with open(path_stem + ".bin", "wb") as f:
+            f.write(raw)
+        return "bin"
     try:
         data = obj.export()
         if data:
@@ -124,6 +152,11 @@ def json_default(o):
     return str(o)
 
 def main():
+    global OUT
+    for a in sys.argv[1:]:
+        if a.startswith('--out='):
+            OUT = a.split('=', 1)[1]
+            break
     files = load_files()
     print(f"{len(files)} files to process", flush=True)
     stats = {}
@@ -151,9 +184,13 @@ def main():
                 fname = safe_name(name, f"{tn}_{obj.path_id}")
                 cls_dir = os.path.join(outdir, tn)
                 os.makedirs(cls_dir, exist_ok=True)
-                ext = None
-                if tn in ("Texture2D", "AudioClip", "Mesh", "Font", "TextAsset", "VideoClip"):
-                    continue  # already exported in earlier passes
+                if tn == "AudioClip":
+                    tt = obj.read_typetree()   # 必须先取本对象的 typetree (勿用残留值)
+                    handle_audio(obj, env, tt, os.path.join(cls_dir, fname))
+                    counts["exported"] += 1
+                    continue  # 音频已有实体文件 (wav/ogg/vorbis/bin), 不转 JSON
+                if tn in ("Texture2D", "Mesh", "Font", "TextAsset", "VideoClip"):
+                    continue  # 由 fix_exports 导出
                 tt = obj.read_typetree()
                 jpath = os.path.join(cls_dir, fname + ".json")
                 if os.path.exists(jpath):
