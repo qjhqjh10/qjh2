@@ -13,6 +13,13 @@
 - `Warpforge_code/` — 反编译 C# 代码（查逻辑/枚举/字段用）
 - `Warpforge_tools/` — Python 工具集（py312 环境 + 脚本），README 见 `Warpforge_tools/README.md`
 
+## 📖 必读知识文件（新会话先读，避免重复探查）
+
+- **`解包资源使用地图.md`** — 解包资源用途/在用状态/重复损坏/缺失清单/界面元素意义/bundle 清单/工具链（原版游戏怎么组成的知识库）
+- `项目任务文件.md` — 活任务清单（完成任务后更新）
+- `项目资源总览.md` — 顶层目录地图
+- 原版游戏视频存档：`Warpforge_tools/data/原版视频/warppforge_orig.mp4`（UI 参照，帧在 hd/ 子目录）
+
 ## 常用约定
 
 - 运行脚本用 `d:/2/Warpforge_tools/py312/python.exe`（勿用系统 Python 3.14）
