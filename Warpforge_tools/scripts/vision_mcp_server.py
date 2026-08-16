@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Warpforge 视觉副模型 MCP Server（stdio）。
 
-通过 MiniMax M3（OpenCode Go 订阅，OpenAI 兼容 API）识别本地卡图/图片。
+通过 MiniMax M3（OpenCode Go 订阅，OpenAI 兼容 API）识别本地卡图/图片/视频。
 - 环境变量：
   MINIMAX_API_KEY  必填（key 只从环境读取，绝不写入任何文件/日志）
   MINIMAX_BASE_URL 默认 https://opencode.ai/zen/go/v1（OpenCode Go；可覆盖为官方或中转）
   MINIMAX_MODEL    默认 MiniMax-M3（首次真实调用自动探测 /models 修正）
   MINIMAX_MOCK     =1 时进入 mock 模式（不调 API，供无 key 冒烟测试）
 - 工具：
-  vision_analyze(image_path, prompt)        单图识别
+  vision_analyze(image_path, prompt)        单图/单视频识别（视频自动抽帧）
   vision_batch(inputs|directory, template)  批量识别（并发/错误隔离/摘要）
+  vision_compare(images, prompt)            多图对比
+  vision_media(media_path, prompt)          通用媒体识别：图片直发；视频 PyAV 抽帧(≤8帧)多图分析
+- 视频处理：PyAV 内置 ffmpeg 抽帧（每 2s 一帧，长边 1024 JPEG，≤8 帧），
+  走已验证的图像多图能力，不依赖 API 的视频 content 类型。
+  若未来实测 API 原生支持视频 content（MINIMAX_VIDEO_DIRECT=1 可切换直发）。
 安全：stdout 只输出 JSON-RPC 帧；日志走 stderr（WARNING，不含 key）；API 错误截断 500 字符。
 """
 import os
@@ -18,6 +23,7 @@ import json
 import time
 import base64
 import logging
+import io
 import urllib.request
 import urllib.error
 import threading
@@ -43,6 +49,21 @@ MAX_BYTES = 6 * 1024 * 1024
 MAX_BATCH = 50
 DEFAULT_CONCURRENCY = 2
 DEFAULT_TIMEOUT = 180
+
+# 视频支持（PyAV 抽帧管线）
+VIDEO_EXT = {".mp4", ".webm", ".mov", ".mkv"}
+MAX_VIDEO_FRAMES = 8          # 最多抽帧数 (控制 token)
+VIDEO_SAMPLE_SEC = 2.0        # 抽样间隔
+VIDEO_MAX_BYTES = 120 * 1024 * 1024  # 视频上限 120MB (抽帧后只传 JPEG)
+FRAME_MAX_SIDE = 1024         # 抽帧长边
+VIDEO_DIRECT = os.environ.get("MINIMAX_VIDEO_DIRECT") == "1"  # 未来直发视频开关
+
+try:
+    import av  # PyAV (内置 ffmpeg): 视频抽帧
+    HAS_AV = True
+except ImportError:
+    HAS_AV = False
+    log.warning("未安装 PyAV，视频工具将不可用 (pip install av)")
 
 _model_lock = threading.Lock()
 _model_checked = False
@@ -138,6 +159,71 @@ def _read_image(p):
     return "data:image/" + ext[1:] + ";base64," + base64.b64encode(raw).decode("ascii"), None, None
 
 
+# ---------------- 视频处理 (PyAV 抽帧) ----------------
+def _video_frames_to_data_uris(path):
+    """视频 → JPEG data URI 列表（均匀抽样, 长边 1024, ≤MAX_VIDEO_FRAMES 帧）。
+    返回 (uris, error_code, error_msg)。"""
+    if not HAS_AV:
+        return None, "api", "未安装 PyAV，无法处理视频 (pip install av)"
+    if not os.path.isfile(path):
+        return None, "file", f"文件不存在: {path}"
+    size = os.path.getsize(path)
+    if size > VIDEO_MAX_BYTES:
+        return None, "size", f"视频过大 {size // (1024*1024)}MB（上限 {VIDEO_MAX_BYTES//(1024*1024)}MB）"
+    try:
+        container = av.open(path)
+    except Exception as e:
+        return None, "file", f"无法打开视频: {str(e)[:200]}"
+    uris = []
+    try:
+        stream = container.streams.video[0]
+        fps = float(stream.average_rate) if stream.average_rate else 30.0
+        step = max(1, int(fps * VIDEO_SAMPLE_SEC))
+        idx = 0
+        for frame in container.decode(video=0):
+            if idx % step != 0:
+                idx += 1
+                continue
+            idx += 1
+            img = frame.to_image()
+            # 等比缩到长边 FRAME_MAX_SIDE
+            w, h = img.size
+            if max(w, h) > FRAME_MAX_SIDE:
+                s = FRAME_MAX_SIDE / float(max(w, h))
+                img = img.resize((int(w * s), int(h * s)))
+            buf = io.BytesIO()
+            img.save(buf, "JPEG", quality=82)
+            uris.append("data:image/jpeg;base64," +
+                        base64.b64encode(buf.getvalue()).decode("ascii"))
+            if len(uris) >= MAX_VIDEO_FRAMES:
+                break
+    except Exception as e:
+        if not uris:
+            return None, "file", f"抽帧失败: {str(e)[:200]}"
+    finally:
+        try:
+            container.close()
+        except Exception:
+            pass
+    if not uris:
+        return None, "file", "视频无有效帧"
+    return uris, None, None
+
+
+def _read_media(p):
+    """图片直读; 视频抽帧。返回 (data_uris, error_code, error_msg)。"""
+    path = _resolve_path(p)
+    if not path:
+        return None, "file", f"文件不存在: {p}"
+    ext = os.path.splitext(path)[1].lower()
+    if ext in VIDEO_EXT:
+        return _video_frames_to_data_uris(path)
+    if ext in ALLOWED_EXT:
+        uri, ec, err = _read_image(path)
+        return ([uri], ec, err) if uri else (None, ec, err)
+    return None, "file", f"不支持的媒体格式: {ext} (支持 {sorted(ALLOWED_EXT | VIDEO_EXT)})"
+
+
 # ---------------- MiniMax 调用 ----------------
 def _call_once(prompt, data_uris, timeout):
     """单次调用（支持多图）。返回 (text, error_code, error_msg)。"""
@@ -229,6 +315,25 @@ def vision_analyze(image_path: str, prompt: str) -> str:
     prompt 是给视觉模型的指示（如"描述这张卡图"、"提取卡面文字"）。"""
     r = _analyze_one(image_path, prompt, DEFAULT_TIMEOUT)
     return json.dumps(r, ensure_ascii=False)
+
+
+@mcp.tool()
+def vision_media(media_path: str, prompt: str) -> str:
+    """识别本地媒体文件：图片直发；视频（mp4/webm/mov/mkv）自动抽帧 ≤8 帧后多图分析。
+    media_path 可为绝对路径，或相对 d:/2/解包整理/ 的路径；
+    prompt 是给视觉模型的指示（如"描述这个视频的内容"、"提取画面中的文字"）。
+    适合：开包动画、主菜单背景视频、战斗结算动画的内容识别。"""
+    uris, ec, err = _read_media(media_path)
+    if ec:
+        return json.dumps({"file": media_path, "ok": False, "text": None,
+                           "error": err, "error_code": ec, "duration_ms": 0},
+                          ensure_ascii=False)
+    t0 = time.time()
+    text, ec2, err2 = _call_with_retry(prompt, uris, DEFAULT_TIMEOUT)
+    n_frame = len(uris)
+    return json.dumps({"file": media_path, "ok": ec2 is None, "text": text,
+                       "frames": n_frame, "error": err2, "error_code": ec2,
+                       "duration_ms": int((time.time() - t0) * 1000)}, ensure_ascii=False)
 
 
 @mcp.tool()
