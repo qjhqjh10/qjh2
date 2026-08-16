@@ -216,21 +216,23 @@ def build_tree(ui_dir: str) -> dict:
                 comps.append(comp_to_dict(index, cd, extra_spr))
         gos[pid] = {'name': d.get('m_Name', ''), 'active': d.get('m_IsActive', True),
                     'comps': comps}
-    # RectTransform (Transform 组件) -> 归属 GameObject / 父 / 子
-    # 注意: m_Father/m_Children 引用的是 Transform 的 PathID, 不是 GameObject 的
+    # RectTransform/Transform (组件) -> 归属 GameObject / 父 / 子
+    # 注意: m_Father/m_Children 引用的是 Transform 的 PathID, 不是 GameObject 的;
+    # 父链同时包含普通 Transform (3D 容器节点, 无 rect 数据)
     go_by_transform = {}  # transform_pid -> gameobj_pid
-    rts = {}              # transform_pid -> rect 数据
+    rts = {}              # transform_pid -> rect 数据 (仅 RectTransform)
     parents = {}          # transform_pid -> father transform pid
     children = {}         # father -> [children transforms]
     for pid, ent in index.items():
-        if ent['type'] != 'RectTransform':
+        if ent['type'] not in ('RectTransform', 'Transform'):
             continue
         d = ent['data']
         go = (d.get('m_GameObject') or {}).get('m_PathID')
         if go is None:
             continue
         go_by_transform[pid] = go
-        rts[pid] = rect_to_dict(d)
+        if ent['type'] == 'RectTransform':
+            rts[pid] = rect_to_dict(d)
         f = (d.get('m_Father') or {}).get('m_PathID')
         parents[pid] = f
         for ch in (d.get('m_Children') or []):
@@ -252,12 +254,13 @@ def build_tree(ui_dir: str) -> dict:
             n['rect'] = rts[tid]
         if go['comps']:
             n['components'] = go['comps']
-        chs = [c for c in children.get(tid, []) if c in rts]
+        chs = [c for c in children.get(tid, []) if c in go_by_transform]
         if chs:
             n['children'] = [node(c, depth + 1) for c in chs]
         return n
 
-    roots = [t for t in rts if parents.get(t) not in rts]
+    all_t = set(go_by_transform)
+    roots = [t for t in all_t if parents.get(t) not in all_t]
     tree = [node(t) for t in sorted(roots, key=lambda t: str(
         gos.get(go_by_transform.get(t, t), {}).get('name', t)))]
     # 统计
