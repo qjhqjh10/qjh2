@@ -90,7 +90,15 @@ def classify_component(d: dict) -> str:
 
 # ---------- 引用解析 ----------
 
-def resolve_sprite(index, comp: dict, extra_spr=None):
+# 跨 bundle 引用无法按 PathID 匹配 (Addressables 重映射) 时的语义别名兜底
+# (Unity UI 惯例: 元素名与 sprite 名语义一致; 名字来源 = 已提取的 bundle sprite)
+SPRITE_ALIASES = {
+    'Profile border': 'Player Profile Border Gold',
+    'RowBackground': 'Smooth background lateral',
+}
+
+
+def resolve_sprite(index, comp: dict, extra_spr=None, node_name: str = ''):
     """Image 组件 -> Sprite 信息 (name/rect/atlas/texture 路径)
     extra_spr: pathid -> {name, file} 补充索引 (AssetBundle 提取出的 sprite)"""
     sp = comp.get('m_Sprite') or {}
@@ -118,14 +126,17 @@ def resolve_sprite(index, comp: dict, extra_spr=None):
     if extra_spr is not None and pid in extra_spr:
         e = extra_spr[pid]
         return {'name': e['name'], 'rect': e.get('rect'), 'from': 'bundle'}
+    # 语义别名兜底 (跨 bundle 引用)
+    if node_name in SPRITE_ALIASES:
+        return {'name': SPRITE_ALIASES[node_name], 'from': 'alias'}
     return None
 
 
-def comp_to_dict(index, comp: dict, extra_spr=None) -> dict:
+def comp_to_dict(index, comp: dict, extra_spr=None, node_name: str = '') -> dict:
     t = classify_component(comp)
     out = {'type': t}
     if t == 'Image':
-        sp = resolve_sprite(index, comp, extra_spr)
+        sp = resolve_sprite(index, comp, extra_spr, node_name)
         if sp:
             out['sprite'] = sp
         color = comp.get('m_Color') or {}
@@ -213,7 +224,7 @@ def build_tree(ui_dir: str) -> dict:
             cd = ce['data']
             # 确认组件归属该 GameObject (双份导出时 m_GameObject 可能不同)
             if (cd.get('m_GameObject') or {}).get('m_PathID') in (pid, None):
-                comps.append(comp_to_dict(index, cd, extra_spr))
+                comps.append(comp_to_dict(index, cd, extra_spr, d.get('m_Name', '')))
         gos[pid] = {'name': d.get('m_Name', ''), 'active': d.get('m_IsActive', True),
                     'comps': comps}
     # RectTransform/Transform (组件) -> 归属 GameObject / 父 / 子
