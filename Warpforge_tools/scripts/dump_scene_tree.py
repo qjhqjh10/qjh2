@@ -11,12 +11,40 @@ SCENE = sys.argv[1] if len(sys.argv) > 1 else 'D:/2/解包整理/07_场景/mainm
 OUT = sys.argv[2] if len(sys.argv) > 2 else 'D:/2/Warpforge_tools/data/ui_layout/主菜单全树.md'
 W, H = 1920, 1080  # 原版设计分辨率
 
-def load(t, pid):
-    for f in glob.glob(os.path.join(SCENE, t, f'*_{pid}.json')):
-        try:
-            return json.load(open(f, encoding='utf-8'))
-        except Exception:
+_cache = {}
+_file_idx = None
+
+def _build_file_idx():
+    """一次扫描全部类型目录, pathid → 文件路径"""
+    global _file_idx
+    _file_idx = {}
+    for t in ['GameObject', 'RectTransform', 'Transform', 'MonoBehaviour']:
+        td = os.path.join(SCENE, t)
+        if not os.path.isdir(td):
             continue
+        for f in os.listdir(td):
+            if not f.endswith('.json'):
+                continue
+            m = f.rsplit('_', 1)
+            if len(m) != 2 or not m[1].replace('.json', '').lstrip('-').isdigit():
+                continue
+            _file_idx.setdefault(t, {})[int(m[1].replace('.json', ''))] = os.path.join(td, f)
+
+def load(t, pid):
+    key = (t, pid)
+    if key in _cache:
+        return _cache[key]
+    if _file_idx is None:
+        _build_file_idx()
+    f = _file_idx.get(t, {}).get(pid)
+    if f:
+        try:
+            d = json.load(open(f, encoding='utf-8'))
+            _cache[key] = d
+            return d
+        except Exception:
+            pass
+    _cache[key] = None
     return None
 
 def go_file(pid):
