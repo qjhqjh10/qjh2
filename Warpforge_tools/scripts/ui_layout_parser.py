@@ -90,37 +90,42 @@ def classify_component(d: dict) -> str:
 
 # ---------- 引用解析 ----------
 
-def resolve_sprite(index, comp: dict):
-    """Image 组件 -> Sprite 信息 (name/rect/atlas/texture 路径)"""
+def resolve_sprite(index, comp: dict, extra_spr=None):
+    """Image 组件 -> Sprite 信息 (name/rect/atlas/texture 路径)
+    extra_spr: pathid -> {name, file} 补充索引 (AssetBundle 提取出的 sprite)"""
     sp = comp.get('m_Sprite') or {}
     pid = sp.get('m_PathID')
     if pid is None:
         return None
     ent = index.get(pid)
-    if not ent:
-        return None
-    d = ent['data']
-    tex = (d.get('m_RD') or {}).get('texture') or {}
-    tex_pid = tex.get('m_PathID')
-    tex_name = None
-    if tex_pid is not None:
-        te = index.get(tex_pid)
-        if te:
-            tex_name = te['data'].get('m_Name')
-    return {
-        'name': d.get('m_Name'),
-        'rect': d.get('m_Rect'),
-        'atlas': (d.get('m_AtlasTags') or [None])[0],
-        'texture': tex_name,
-        'type': d.get('m_Type'),
-    }
+    if ent:
+        d = ent['data']
+        tex = (d.get('m_RD') or {}).get('texture') or {}
+        tex_pid = tex.get('m_PathID')
+        tex_name = None
+        if tex_pid is not None:
+            te = index.get(tex_pid)
+            if te:
+                tex_name = te['data'].get('m_Name')
+        return {
+            'name': d.get('m_Name'),
+            'rect': d.get('m_Rect'),
+            'atlas': (d.get('m_AtlasTags') or [None])[0],
+            'texture': tex_name,
+            'type': d.get('m_Type'),
+        }
+    # 补充索引 (bundle 提取)
+    if extra_spr is not None and pid in extra_spr:
+        e = extra_spr[pid]
+        return {'name': e['name'], 'rect': e.get('rect'), 'from': 'bundle'}
+    return None
 
 
-def comp_to_dict(index, comp: dict) -> dict:
+def comp_to_dict(index, comp: dict, extra_spr=None) -> dict:
     t = classify_component(comp)
     out = {'type': t}
     if t == 'Image':
-        sp = resolve_sprite(index, comp)
+        sp = resolve_sprite(index, comp, extra_spr)
         if sp:
             out['sprite'] = sp
         color = comp.get('m_Color') or {}
@@ -141,7 +146,7 @@ def comp_to_dict(index, comp: dict) -> dict:
         if tg.get('m_PathID'):
             ent = index.get(tg['m_PathID'])
             if ent and 'm_Sprite' in ent['data']:
-                out['target_sprite'] = resolve_sprite(index, ent['data'])
+                out['target_sprite'] = resolve_sprite(index, ent['data'], extra_spr)
     elif t == 'ScrollRect':
         out['movement'] = comp.get('m_movementType')
     return out
@@ -161,8 +166,36 @@ def rect_to_dict(rt: dict) -> dict:
 
 # ---------- 树构建 ----------
 
+def load_extra_sprites() -> dict:
+    """扫描 ui_extract 提取目录, 建立 pathid -> sprite 补充索引"""
+    extra = {}
+    base = 'd:/2/Warpforge_tools/data/ui_extract/'
+    if not os.path.isdir(base):
+        return extra
+    for bundle in os.listdir(base):
+        sdir = os.path.join(base, bundle, 'Sprite')
+        if not os.path.isdir(sdir):
+            continue
+        for f in os.listdir(sdir):
+            if not f.endswith('.json'):
+                continue
+            try:
+                with open(os.path.join(sdir, f), encoding='utf-8') as fh:
+                    d = json.load(fh)
+            except Exception:
+                continue
+            pid = d.get('pathid')
+            if pid is not None:
+                extra[pid] = {'name': d.get('m_Name'), 'rect': d.get('m_Rect'),
+                              'file': os.path.join(sdir, d.get('m_Name', '') + '.png')}
+    return extra
+
+
 def build_tree(ui_dir: str) -> dict:
+    if not os.path.isabs(ui_dir):
+        ui_dir = os.path.join(SRC, ui_dir)
     index, by_name = build_index(ui_dir)
+    extra_spr = load_extra_sprites()
     # GameObject -> 组件列表
     gos = {}  # pathid -> {'name','active','comps':[...]}
     for pid, ent in index.items():
@@ -180,7 +213,7 @@ def build_tree(ui_dir: str) -> dict:
             cd = ce['data']
             # 确认组件归属该 GameObject (双份导出时 m_GameObject 可能不同)
             if (cd.get('m_GameObject') or {}).get('m_PathID') in (pid, None):
-                comps.append(comp_to_dict(index, cd))
+                comps.append(comp_to_dict(index, cd, extra_spr))
         gos[pid] = {'name': d.get('m_Name', ''), 'active': d.get('m_IsActive', True),
                     'comps': comps}
     # RectTransform (Transform 组件) -> 归属 GameObject / 父 / 子
@@ -225,14 +258,14 @@ def build_tree(ui_dir: str) -> dict:
         return n
 
     roots = [t for t in rts if parents.get(t) not in rts]
-    tree = [node(t) for t in sorted(roots, key=lambda t: gos[go_by_transform.get(t, t)]['name'])]
+    tree = [node(t) for t in sorted(roots, key=lambda t: str(
+        gos.get(go_by_transform.get(t, t), {}).get('name', t)))]
     # 统计
     stats = {'gameobjects': len(gos), 'rects': len(rts),
              'components': sum(len(g['comps']) for g in gos.values()),
              'roots': len(roots)}
     return {'ui': os.path.basename(ui_dir.rstrip('/\\')),
             'stats': stats, 'tree': tree}
-
 
 def main() -> int:
     if len(sys.argv) < 2:

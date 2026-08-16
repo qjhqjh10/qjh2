@@ -67,9 +67,10 @@ def main() -> int:
                         if img is not None:
                             img.save(dest)
                             n_spr += 1
-                    # 仍存 rect 信息 (供对齐验证)
+                    # 仍存 rect 信息 + PathID (供布局解析器反查)
                     rect = data.m_Rect
                     info = {'m_Name': sname,
+                            'pathid': getattr(obj, 'path_id', None),
                             'm_Rect': {'x': rect.x, 'y': rect.y,
                                        'width': rect.width, 'height': rect.height},
                             'm_AtlasTags': ['Atlas'],
