@@ -52,19 +52,26 @@ def go_file(pid):
         return f
     return None
 
-# 1) GO 索引
+# 1) GO 索引 (兼容无 PathID 后缀的文件: 文件名即 m_Name, 合成负 pid)
 go_names, go_comps = {}, {}
+_anon_id = 0
 for f in glob.glob(os.path.join(SCENE, 'GameObject', '*.json')):
     base = os.path.basename(f)
     m = base.rsplit('_', 1)
-    if len(m) != 2 or not m[1].replace('.json', '').lstrip('-').isdigit():
-        continue  # 跳过无 pathid 的重复文件
-    pid = int(m[1].replace('.json', ''))
+    if len(m) == 2 and m[1].replace('.json', '').lstrip('-').isdigit():
+        pid = int(m[1].replace('.json', ''))
+    else:
+        # 无后缀文件: 合成唯一负 pid (多实例时按枚举区分)
+        _anon_id -= 1
+        pid = _anon_id
     try:
         d = json.load(open(f, encoding='utf-8'))
     except Exception:
         continue
-    go_names[pid] = d.get('m_Name', '?')
+    name = d.get('m_Name', '')
+    if not name:
+        name = base[:-5]  # 无 m_Name 时文件名即名字
+    go_names[pid] = name
     go_comps[pid] = [c['component']['m_PathID'] for c in d.get('m_Component', [])]
 
 # 2) RectTransform + Transform
@@ -146,12 +153,14 @@ def walk(go_pid, depth, pabs, is_root=False):
     name = go_names.get(go_pid, f'<GO{go_pid}>')
     go = load('GameObject', go_pid)
     active = go.get('m_IsActive', True) if go else True
-    # 找该 GO 的 RT
+    # 找该 GO 的 RT / Transform (battlearena1 混合: UI 用 RT, 3D 对象用 Transform)
     rt = None
+    tr = None
     for cpid in go_comps.get(go_pid, []):
-        if cpid in rects:
+        if cpid in rects and rt is None:
             rt = cpid
-            break
+        elif cpid in transforms and tr is None:
+            tr = cpid
     npabs = pabs
     extra = []
     parts = []
@@ -168,39 +177,53 @@ def walk(go_pid, depth, pabs, is_root=False):
             s = mb_summary(mb)
             if s:
                 parts.append(','.join(s))
-        if cpid in go_comps and False:
-            pass
     mark = ' (inactive)' if not active else ''
     line = '  ' * depth + f'- {name}{mark} ' + ' '.join(parts)
     lines.append(line)
+    # 子项: Transform 链 + RT 链 合并去重 (Unity 父子引用均为 Transform PathID)
+    kids = []
+    if tr:
+        kids += children_map.get(tr, [])
     if rt:
         for c in children_map.get(rt, []):
-            child_go = None
-            for gpid, comps in go_comps.items():
-                if c in comps:
-                    child_go = gpid
-                    break
-            if child_go:
-                walk(child_go, depth + 1, npabs)
+            if c not in kids:
+                kids.append(c)
+    for c in kids:
+        child_go = None
+        for gpid, comps in go_comps.items():
+            if c in comps:
+                child_go = gpid
+                break
+        if child_go:
+            walk(child_go, depth + 1, npabs)
 
+# 根: 优先找 Transform.m_Father 为空 的 GO (兼容 battlearena1: 场景根在 Transform 层)
 roots = 0
-for pid, d in list(rects.items()) + list(transforms.items()):
+root_seen = set()
+for pid, d in transforms.items():
     f = d.get('m_Father', {})
-    fpid = f.get('m_PathID') if isinstance(f, dict) else f
-    if not fpid and pid in go_comps or (fpid == 0):
-        pass
-# 根: 无 father 的 RT 对应 GO
-for pid in rects:
-    f = rects[pid].get('m_Father', {})
     fpid = f.get('m_PathID') if isinstance(f, dict) else f
     if not fpid:
         for gpid, comps in go_comps.items():
-            if pid in comps:
+            if pid in comps and gpid not in root_seen:
                 walk(gpid, 0, (0, 0, W, H))
                 roots += 1
+                root_seen.add(gpid)
                 break
+# 退回: RT 层无 father 的节点 (纯 UI 场景如 mainmenuwarpforge)
+if roots == 0:
+    for pid in rects:
+        f = rects[pid].get('m_Father', {})
+        fpid = f.get('m_PathID') if isinstance(f, dict) else f
+        if not fpid:
+            for gpid, comps in go_comps.items():
+                if pid in comps:
+                    walk(gpid, 0, (0, 0, W, H))
+                    roots += 1
+                    break
 
-header = f"""# 主菜单场景全树 (解包 07_场景/mainmenuwarpforge)
+scene_name = os.path.basename(SCENE.rstrip('/\\'))
+header = f"""# {scene_name} 场景全树 (解包 07_场景/{scene_name})
 > 生成: dump_scene_tree.py | GO {len(go_names)} / RT {len(rects)} / 根 {roots}
 > 坐标=Godot(1920x1080, y向下); sprite=PathID(查 ui_extract 索引); 标注 (inactive) 的场景中禁用
 
