@@ -86,8 +86,49 @@ def load_tex_png(tex_pid, name):
     return None
 
 
+def find_ps_recursive(go_name, depth=0):
+    """沿子 GO 递归找含 ParticleSystem 的 GO (组合特效: 根 GO 只是空容器)"""
+    if depth > 6:
+        return None
+    go_files = glob.glob(os.path.join(PREFAB, 'GameObject', go_name + '*.json'))
+    if not go_files:
+        return None
+    g = json.load(open(go_files[0], encoding='utf-8'))
+    comps = [c['component']['m_PathID'] for c in g.get('m_Component', [])]
+    for c in comps:
+        for f in glob.glob(os.path.join(PREFAB, 'ParticleSystem', f'*_{c}.json')):
+            if f.endswith(f'_{c}.json') and not f.endswith(f'_{c}_{c}.json'):
+                return (go_name, f, c, comps)
+    tr = None
+    for c in comps:
+        for f in glob.glob(os.path.join(PREFAB, 'Transform', f'*_{c}.json')):
+            if f.endswith(f'_{c}.json') and not f.endswith(f'_{c}_{c}.json'):
+                tr = json.load(open(f, encoding='utf-8'))
+                break
+        if tr:
+            break
+    if not tr:
+        return None
+    for ch in tr.get('m_Children', []):
+        cpid = ch.get('m_PathID') if isinstance(ch, dict) else ch
+        for gf in os.listdir(os.path.join(PREFAB, 'GameObject')):
+            if not gf.endswith('.json'):
+                continue
+            try:
+                gg = json.load(open(os.path.join(PREFAB, 'GameObject', gf), encoding='utf-8'))
+            except Exception:
+                continue
+            gcomps = [c['component']['m_PathID'] for c in gg.get('m_Component', [])]
+            if cpid in gcomps:
+                r = find_ps_recursive(gg.get('m_Name'), depth + 1)
+                if r:
+                    return r
+                break
+    return None
+
+
 def convert_effect(go_name):
-    """按 GO 名转换特效: GO → ParticleSystem + Renderer → Material → 纹理"""
+    """按 GO 名转换特效: GO → ParticleSystem + Renderer → Material → 纹理 (组合特效递归子 GO)"""
     go_files = glob.glob(os.path.join(PREFAB, 'GameObject', go_name + '*.json')) or \
                globals().get('go_files', [])
     if not go_files:
@@ -95,7 +136,7 @@ def convert_effect(go_name):
         return False
     g = json.load(open(go_files[0], encoding='utf-8'))
     comps = [c['component']['m_PathID'] for c in g.get('m_Component', [])]
-    # 找 ParticleSystem
+    # 找 ParticleSystem (直接组件; 无则递归子 GO)
     ps_path = None
     for c in comps:
         for f in glob.glob(os.path.join(PREFAB, 'ParticleSystem', f'*_{c}.json')):
@@ -104,6 +145,14 @@ def convert_effect(go_name):
                 break
         if ps_path:
             break
+    if not ps_path:
+        r = find_ps_recursive(go_name)
+        if r:
+            resolved_name, ps_path, _, rcomps = r
+            g = json.load(open(glob.glob(os.path.join(PREFAB, 'GameObject', resolved_name + '*.json'))[0],
+                               encoding='utf-8'))
+            comps = rcomps
+            print(f'  [子GO] {go_name} → {resolved_name}')
     if not ps_path:
         print(f'✗ {go_name}: 无 ParticleSystem 组件')
         return False
@@ -175,17 +224,20 @@ def convert_effect(go_name):
     tex_final = tex_path
     if tex_path and os.path.exists(tex_path):
         # 预乘 alpha 修复 (解包纹理 ~54% alpha 损坏: RGB 完整但 alpha≈0 → 粒子全透明)
+        # ⚠️ 只对"RGB 完整"型损坏修复 (RGB 平均 >100); 合法半透明纹理 (暗底亮芯火花图) 不动
         from PIL import Image
         img_tex = Image.open(tex_path).convert('RGBA')
         w0, h0 = img_tex.size
         px0 = img_tex.load()
-        n0 = 0; tr0 = 0
+        n0 = 0; tr0 = 0; rgb_sum = 0
         for yy in range(0, h0, 2):
             for xx in range(0, w0, 2):
                 n0 += 1
-                if px0[xx, yy][3] < 10:
+                p = px0[xx, yy]
+                if p[3] < 10:
                     tr0 += 1
-        if n0 > 0 and tr0 / n0 > 0.5:
+                rgb_sum += (p[0] + p[1] + p[2]) / 3
+        if n0 > 0 and tr0 / n0 > 0.5 and rgb_sum / n0 > 100:
             r, g, b, a = img_tex.split()
             img_tex = Image.merge('RGBA', (r, g, b, a.point(lambda v: 255)))
             img_tex.save(tex_path)
