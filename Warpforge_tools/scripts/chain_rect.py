@@ -4,6 +4,9 @@
 chain_rect.py — 从原始 Unity JSON 沿 m_Father 链式换算任意 GO 的绝对屏幕坐标
 用法: py312 chain_rect.py <场景目录> <GO PathID 或 GO 名>
 输出: GO名 [父链] -> Godot 屏幕坐标 x[y1,y2]
+
+v2 (2026-08-21): 补 m_LocalScale 支持 — 缩放绕自身 pivot 应用, 沿链累计
+(mode_select 法力曲线抽屉 m_LocalScale=1.2 为唯一缩放节点的教训, 坑 37)
 """
 import json, os, sys, glob
 
@@ -14,10 +17,22 @@ W, H = 1920.0, 1080.0
 
 go_index = {}   # GO PathID -> GO data
 rt_index = {}   # RT PathID -> RT data
+tr_index = {}   # Transform PathID -> data (m_LocalScale)
+tr_by_go = {}   # GO PathID -> Transform data
 go_name = {}    # GO PathID -> name
 name_idx = {}   # name -> [GO PathID]
+rt_scale = {}   # RT PathID -> {x,y} (extract_rt_scale.py 从游戏本体 typetree 提取; JSON 导出丢失 m_LocalScale)
 
-for t in ['GameObject', 'RectTransform']:
+# 加载 scale 映射 (坑 37: 曲线抽屉 m_LocalScale=1.2 等 2782 节点, 2026-08-21)
+SCALE_MAP_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              'data', 'ui_layout', 'rt_scale_map.json')
+if os.path.exists(SCALE_MAP_PATH):
+    try:
+        rt_scale = json.load(open(SCALE_MAP_PATH, encoding='utf-8'))
+    except Exception:
+        rt_scale = {}
+
+for t in ['GameObject', 'RectTransform', 'Transform']:
     td = os.path.join(SRC, t)
     if not os.path.isdir(td):
         continue
@@ -40,9 +55,15 @@ for t in ['GameObject', 'RectTransform']:
                 nm = d.get('m_Name')
                 if isinstance(nm, str) and nm:
                     name_idx.setdefault(nm, []).append(pid)
-        else:
+        elif t == 'RectTransform':
             if pid not in rt_index:
                 rt_index[pid] = d
+        else:  # Transform (m_LocalScale 来源)
+            if pid not in tr_index:
+                tr_index[pid] = d
+                gop = d.get('m_GameObject', {}).get('m_PathID')
+                if gop is not None:
+                    tr_by_go.setdefault(gop, []).append(d)
 
 
 def find_goid(target):
@@ -68,20 +89,33 @@ def go_rt(goid):
     return None
 
 
+def go_scale(goid):
+    """GO 的 Transform m_LocalScale (x 分量; 默认 1.0)"""
+    for tr in tr_by_go.get(goid, []):
+        sc = tr.get('m_LocalScale') or {}
+        sx = sc.get('x', 1)
+        sy = sc.get('y', sx)
+        if sx != 1 or sy != 1:
+            return (sx, sy)
+    return (1.0, 1.0)
+
+
 def rt_rect(rtid):
-    """RT -> (Godot x1,y1,x2,y2) 绝对坐标; 断链返回 None"""
+    """RT -> dict{s:(x1,y1,x2,y2) 屏幕坐标(含全部祖先+自身 scale),
+                  l:(x1,y1,x2,y2) 布局坐标(未缩放), scale: 累计 scale, pivot:(x,y)}
+       断链返回 None"""
     rt = rt_index.get(rtid)
     if rt is None:
         return None
     fid = rt.get('m_Father', {}).get('m_PathID')
     if fid is not None and fid in rt_index:
-        parent = rt_rect(fid)
-        if parent is None:
+        par = rt_rect(fid)
+        if par is None:
             return None
+        ps, pl, psc = par['s'], par['l'], par['scale']
+        ppvx, ppvy = par['pivot']
     else:
-        # 根元素 (父不是 RT): 父参照 = 全屏 1920x1080 (Canvas), 但自身 anchoredPosition/sizeDelta 仍有效
-        # (如 Gacha Tab: anchor(0,0,1,1) anchoredPos(82,0) sizeDelta(-163.6,0) → x[163.8,1920])
-        # 特判: 场景根 Canvas (anchor 收缩 0,0 + sizeDelta 0 + anchoredPos 0) 恒为全屏
+        # 根元素 (父不是 RT): 父参照 = 全屏 1920x1080 (Canvas)
         amn0 = rt.get('m_AnchorMin') or {}
         amx0 = rt.get('m_AnchorMax') or {}
         ap0 = rt.get('m_AnchoredPosition') or {}
@@ -90,10 +124,10 @@ def rt_rect(rtid):
                 and amx0.get('x', 0) == 0 and amx0.get('y', 0) == 0
                 and ap0.get('x', 0) == 0 and ap0.get('y', 0) == 0
                 and sd0.get('x', 0) == 0 and sd0.get('y', 0) == 0):
-            return (0.0, 0.0, W, H)
-        parent = (0.0, 0.0, W, H)
-    px1, py1, px2, py2 = parent
-    pw, ph = px2 - px1, py2 - py1
+            return {'s': (0.0, 0.0, W, H), 'l': (0.0, 0.0, W, H),
+                    'scale': 1.0, 'pivot': (0.5, 0.5)}
+        ps, pl, psc, ppvx, ppvy = (0.0, 0.0, W, H), (0.0, 0.0, W, H), 1.0, 0.5, 0.5
+    pw, ph = pl[2] - pl[0], pl[3] - pl[1]
     amn = rt.get('m_AnchorMin') or {}
     amx = rt.get('m_AnchorMax') or {}
     ap = rt.get('m_AnchoredPosition') or {}
@@ -104,21 +138,41 @@ def rt_rect(rtid):
     apx, apy = ap.get('x', 0), ap.get('y', 0)
     sdx, sdy = sd.get('x', 0), sd.get('y', 0)
     pvx, pvy = pv.get('x', 0.5), pv.get('y', 0.5)
-    # 2026-08-20 修复拉伸锚点 bug (anchorMin≠anchorMax 且 pivot≠0.5 时旧算法差 ~67px):
-    # Unity 语义: offsetMin = anchoredPosition - pivot*sizeDelta (相对锚点 min 点),
-    #            offsetMax = anchoredPosition + (1-pivot)*sizeDelta (相对锚点 max 点)
-    # 收缩锚点 (min==max) 时与旧"锚点中心+pivot 展开"数学等价; 拉伸时以 offsetMin/Max 为准
-    # 锚点 min/max 点 (Godot y 向下): Unity y 向上 -> Godot gy = py1 + (1-ay)*ph
-    amin_x = px1 + ax0 * pw
-    amax_x = px1 + ax1 * pw
-    amin_gy = py1 + (1.0 - ay0) * ph
-    amax_gy = py1 + (1.0 - ay1) * ph
-    # offsetMin/offsetMax: Unity y 向上为正 -> Godot 顶/底边 = 锚点 y - 偏移
-    gx1 = amin_x + (apx - pvx * sdx)
-    gx2 = amax_x + (apx + (1.0 - pvx) * sdx)
-    gy1 = amax_gy - (apy + (1.0 - pvy) * sdy)
-    gy2 = amin_gy - (apy - pvy * sdy)
-    return (gx1, gy1, gx2, gy2)
+    # 布局矩形 (父布局空间): 锚点 min/max 点 (Godot y 向下)
+    amin_x = pl[0] + ax0 * pw
+    amax_x = pl[0] + ax1 * pw
+    amin_gy = pl[1] + (1.0 - ay0) * ph
+    amax_gy = pl[1] + (1.0 - ay1) * ph
+    lx1 = amin_x + (apx - pvx * sdx)
+    lx2 = amax_x + (apx + (1.0 - pvx) * sdx)
+    ly1 = amax_gy - (apy + (1.0 - pvy) * sdy)
+    ly2 = amin_gy - (apy - pvy * sdy)
+    # 映射到屏幕: 父缩放绕父布局 pivot (pivot 点不变)
+    ppiv_sx = ps[0] + (ps[2] - ps[0]) * ppvx
+    ppiv_sy = ps[1] + (ps[3] - ps[1]) * ppvy
+    ppiv_lx = pl[0] + (pl[2] - pl[0]) * ppvx
+    ppiv_ly = pl[1] + (pl[3] - pl[1]) * ppvy
+    sx1 = ppiv_sx + (lx1 - ppiv_lx) * psc
+    sy1 = ppiv_sy + (ly1 - ppiv_ly) * psc
+    sx2 = ppiv_sx + (lx2 - ppiv_lx) * psc
+    sy2 = ppiv_sy + (ly2 - ppiv_ly) * psc
+    # 自身 scale 绕自身 pivot (优先 scale 映射; 兜底 Transform JSON 关联)
+    scx, scy = 1.0, 1.0
+    smap = rt_scale.get(str(rtid))
+    if smap:
+        scx = float(smap.get('x', 1))
+        scy = float(smap.get('y', scx))
+    else:
+        scx, scy = go_scale(rt.get('m_GameObject', {}).get('m_PathID'))
+    if scx != 1.0 or scy != 1.0:
+        spx = sx1 + (sx2 - sx1) * pvx
+        spy = sy1 + (sy2 - sy1) * pvy
+        sx1 = spx + (sx1 - spx) * scx
+        sx2 = spx + (sx2 - spx) * scx
+        sy1 = spy + (sy1 - spy) * scy
+        sy2 = spy + (sy2 - spy) * scy
+    return {'s': (sx1, sy1, sx2, sy2), 'l': (lx1, ly1, lx2, ly2),
+            'scale': psc * scx, 'pivot': (pvx, pvy)}
 
 
 def main():
@@ -144,9 +198,11 @@ def main():
         chain.append('%s(%s)' % (go_name.get(fgo, '?'), f))
         n = f
     if rect:
-        print('%s (GO %s)\n  父链: %s\n  Godot: x[%.1f, %.1f] y[%.1f, %.1f] (宽 %.1f 高 %.1f)' % (
+        sx1, sy1, sx2, sy2 = rect['s']
+        print('%s (GO %s)\n  父链: %s\n  Godot: x[%.1f, %.1f] y[%.1f, %.1f] (宽 %.1f 高 %.1f)%s' % (
             name, goid, ' <- '.join(chain[::-1]) if chain else '(根)',
-            rect[0], rect[2], rect[1], rect[3], rect[2] - rect[0], rect[3] - rect[1]))
+            sx1, sy1, sx2, sy2, sx2 - sx1, sy2 - sy1,
+            ('  累计 scale=%.2f' % rect['scale']) if rect['scale'] != 1.0 else ''))
     else:
         print('%s (GO %s) 换算失败' % (name, goid))
 
