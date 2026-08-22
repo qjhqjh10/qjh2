@@ -36,6 +36,7 @@ Material/ParticleSystem/ParticleSystemRenderer/Camera/Light/RenderSettings JSON,
   - 相机 m_Enabled=0 (reflection camera) → enabled=false; 背景色取 3D 相机 m_BackGroundColor
 """
 import argparse
+import glob
 import json
 import math
 import os
@@ -199,9 +200,11 @@ def grad_keys(v):
                 return v0 + (v1 - v0) * f
         return ps[-1][1]
 
+    # 联合时间轴 (color 键+alpha 键的并集): 每个时间点 color/alpha 各自插值 —
+    # 比 8 点均匀重采样精确 (原版键位如 Light Shaft 呼吸脉动 α .2265/.447/.659 会保留)
+    ts = sorted(set([t for t, _ in cols] + [t for t, _ in alphas]))
     out = []
-    for i in range(8):
-        t = i / 7.0
+    for t in ts:
         c = interp(cols, t) or (1.0, 1.0, 1.0)
         a = float(interp(alphas, t) if alphas else 1.0)
         out.append((t, (c[0], c[1], c[2], a)))
@@ -413,11 +416,15 @@ class BundleResolver:
 # ---------------------------------------------------------------- 材质
 class MatInfo:
     def __init__(self, name, tex_ref, blend, keywords, cull, zwrite,
-                 base_color, emission_color, uv_speed, mat_color=None):
+                 base_color, emission_color, uv_speed, mat_color=None,
+                 tex_ref2=None, vector4_1=None):
         self.name = name
         self.tex_ref = tex_ref
         self.tex_name = None
         self.tex_obj = None
+        self.tex_ref2 = tex_ref2       # _SecondaryTex (UV Scroll Runes 第二贴图)
+        self.tex_name2 = None
+        self.tex_obj2 = None
         self.blend = blend
         self.keywords = keywords or []
         self.cull = cull
@@ -426,6 +433,7 @@ class MatInfo:
         self.emission_color = emission_color
         self.mat_color = mat_color
         self.uv_speed = uv_speed
+        self.vector4_1 = vector4_1     # Runes 滚动参数 (r,g,b=tex2平铺, 滚动速率) 疑似 (1,1,0.02,0)
 
     def is_transparent(self):
         return '_SURFACE_TYPE_TRANSPARENT' in self.keywords or \
@@ -444,16 +452,18 @@ def parse_mat(raw, name_hint=''):
     floats = {k: v for k, v in (sp.get('m_Floats', []) or [])}
     colors = {k: v for k, v in (sp.get('m_Colors', []) or [])}
     tex_ref = None
+    tex_ref2 = None
     for pair in texenvs:
         if not isinstance(pair, (list, tuple)) or len(pair) != 2:
             continue
         slot = pair[0]
-        if slot not in ('_BaseMap', '_MainTex'):
-            continue
         t = pair[1].get('m_Texture', {}) if isinstance(pair[1], dict) else {}
-        if t.get('m_PathID'):
+        if not t.get('m_PathID'):
+            continue
+        if slot == '_SecondaryTex' and tex_ref2 is None:
+            tex_ref2 = t
+        elif slot in ('_BaseMap', '_MainTex') and tex_ref is None:
             tex_ref = t
-            break
     uv = floats.get('_UVSpeed')
     uv_speed = (float(uv.get('x', 1.0)), float(uv.get('y', 1.0))) if isinstance(uv, dict) else None
     return MatInfo(str(raw.get('m_Name') or name_hint), tex_ref,
@@ -463,7 +473,8 @@ def parse_mat(raw, name_hint=''):
                    float(floats.get('_ZWrite', 1.0) or 1.0),
                    colors.get('_BaseColor') or colors.get('_Color'),
                    colors.get('_EmissionColor'), uv_speed,
-                   raw.get('m_Color') or colors.get('m_Color'))
+                   raw.get('m_Color') or colors.get('m_Color'),
+                   tex_ref2, colors.get('Vector4_1'))
 
 
 # ---------------------------------------------------------------- 汇编
@@ -485,6 +496,18 @@ class Assembler:
         self.LIG = load_pid_dir(os.path.join(self.root_dir, 'Light'))
         self.REN = load_pid_dir(os.path.join(self.root_dir, 'RenderSettings'))
         self.TEXDIR = os.path.join(self.root_dir, 'Texture2D')
+        # 后处理 ColorLookup 的 LUT 贴图引用 (PostProcessing Profile: Bloom/Vignette/ColorLookup)
+        self.lut_ref_val = None
+        for f in glob.glob(os.path.join(self.root_dir, 'MonoBehaviour', '*.json')):
+            try:
+                d = json.load(open(f, encoding='utf-8'))
+            except Exception:
+                continue
+            if d.get('m_Name') == 'ColorLookup':
+                t = d.get('texture', {}).get('m_Value', {})
+                if t.get('m_PathID'):
+                    self.lut_ref_val = t
+                    break
         self.go_comps = {}
         for pid, g in self.GO.items():
             for c in g.get('m_Component', []):
@@ -519,6 +542,16 @@ class Assembler:
                 if obj is None:
                     return None, None
                 return (self.b.obj_name(obj) or 'mesh%d' % ref.get('m_PathID')), obj
+        # SkinnedMeshRenderer (黑军团 Chain1/Chain2 铁链: 单骨骼=自身, 绑定位=GO 变换; 静态呈现即可,
+        # 形态键甩鞭动画见 clip17 接入) — 没有 SMR 就返回 None
+        for c in self.go_comps.get(gopid, []):
+            smr = self.SMR.get(c)
+            if smr:
+                ref = smr.get('m_Mesh', {})
+                obj = self.b.read_obj(ref, 'Mesh')
+                if obj is None:
+                    return None, None
+                return (self.b.obj_name(obj) or 'mesh%d' % ref.get('m_PathID')), obj
         return None, None
 
     def mats_of(self, gopid):
@@ -547,6 +580,11 @@ class Assembler:
             if obj is not None:
                 mi.tex_name = self.b.obj_name(obj) or 'tex_%s' % mi.tex_ref.get('m_PathID')
                 mi.tex_obj = obj
+        if mi and mi.tex_ref2:
+            obj2 = self.b.read_obj(mi.tex_ref2, 'Texture2D')
+            if obj2 is not None:
+                mi.tex_name2 = self.b.obj_name(obj2) or 'tex2_%s' % mi.tex_ref2.get('m_PathID')
+                mi.tex_obj2 = obj2
         self.mat_cache[key] = mi
         return mi
 
@@ -571,6 +609,9 @@ class Assembler:
 
     def has_comp(self, gopid, comps):
         return any(c in comps for c in self.go_comps.get(gopid, []))
+
+    def has_smr(self, gopid):
+        return any(c in self.SMR for c in self.go_comps.get(gopid, []))
 
     def subtree_has_3d(self, tpid, seen=frozenset()):
         """子树内是否含可见 3D (PS/相机/灯/带材质网格) — 自动识别 3D 根用
@@ -616,8 +657,43 @@ class GdWriter:
         return '%s_%d' % (prefix, self._var)
 
 
+# 原版 shader "Unlit UV scroll" (11_着色器 shaders/Shader_5091587426579848444): _MainTex+_SecondaryTex 双层,
+# "UV Scale (XY) Speed (ZW)" 属性 → 黑军团 Vector4_1=(1,1,0.02,0) 副贴图 U 向 0.02/s 慢滚动 (Runes 符文);
+# _Layers_Blend_Opacity 1.0 / unlit 无光照。Godot: unshaded spatial 双层 mix + TIME 滚动。
+UV_SCROLL_SHADER = '''shader_type spatial;
+render_mode unshaded, blend_mix;
+uniform sampler2D main_tex : filter_linear, repeat_enable;
+uniform sampler2D secondary_tex : filter_linear, repeat_enable;
+uniform float layers_blend_opacity : hint_range(0.0, 1.0) = 1.0;
+uniform vec4 uv_scroll = vec4(1.0, 1.0, 0.02, 0.0);
+
+void fragment() {
+	vec4 c1 = texture(main_tex, UV);
+	vec4 c2 = texture(secondary_tex, UV * uv_scroll.xy + vec2(uv_scroll.z, uv_scroll.w) * TIME);
+	vec4 c = mix(c1, c2, layers_blend_opacity);
+	ALBEDO = c.rgb;
+	ALPHA = c.a;
+}
+'''
+
+
 def mat_gd(w, var, mi, tex_paths):
-    """生成 StandardMaterial3D 代码, 返回变量名"""
+    """生成 StandardMaterial3D 代码, 返回变量名; _SecondaryTex 双贴图材质 → UV scroll ShaderMaterial"""
+    if mi.tex_name2 and mi.tex_name2 in tex_paths:
+        # 双贴图 (Runes "Unlit UV scroll"): shader 双层 + TIME 滚动
+        w.line('var %s := ShaderMaterial.new()' % var)
+        w.line('%s.shader = load("res://assets/uv_scroll.gdshader")' % var)
+        w.line('%s.set_shader_parameter("main_tex", load(%r))' % (var, tex_paths[mi.tex_name]))
+        w.line('%s.set_shader_parameter("secondary_tex", load(%r))' % (var, tex_paths[mi.tex_name2]))
+        v4 = mi.vector4_1 or {}
+        sc = (float(v4.get('r', 1.0) or 1.0), float(v4.get('g', 1.0) or 1.0),
+              float(v4.get('b', 0.0) or 0.0), float(v4.get('a', 0.0) or 0.0))
+        w.line('%s.set_shader_parameter("uv_scroll", Vector4(%.3f, %.3f, %.3f, %.3f))' % (var, *sc))
+        op = 1.0  # _Layers_Blend_Opacity (黑军团 UV Scroll Runes=1.0)
+        w.line('%s.set_shader_parameter("layers_blend_opacity", %.2f)' % (var, op))
+        if mi.cull == 0:
+            w.line('%s.cull_mode = BaseMaterial3D.CULL_DISABLED' % var)
+        return var
     w.line('var %s := StandardMaterial3D.new()' % var)
     if mi.tex_name and mi.tex_name in tex_paths:
         w.line('%s.albedo_texture = load(%r)' % (var, tex_paths[mi.tex_name]))
@@ -640,23 +716,36 @@ def mat_gd(w, var, mi, tex_paths):
     return var
 
 
-# 原版 Battle Arena 4 PostProcessing 数值校准近似 (ColorLookup LUT 为 C# 运行时合成, 解包只有中性模板):
-# 亮部暖黄 (Filmic 压缩 G/B 的补偿) + 暗部红棕 (参考图实测 ~(58,25,19)) + Vignette(0.297/smoothness 0.2)
+# 原版 Battle Arena 4 PostProcessing 按说明文件 (原始 Unity JSON) 复刻:
+# Bloom(threshold 1.15/intensity 5.0/scatter 1.0/skipIterations 6) + Vignette(0.297, smoothness 0.2 默认)
+# + ColorLookup(LUT 图, contribution 1.0) + LUTBlender 全屏 pass(_LUT2=同图, _Blend 1.0 纯上屏)
+# → 黑军团 ColorLookup=LUT Normal(共享资源, 标准 16^3 identity LUT: 行=G 层/格=B 层/格内=R 渐变, 直采=本色=
+#   无颜色分级; 其余阵营各引用自家 LUT Battle Arena <X>.png)。LUT 布局采样: 半像素偏移 + bilinear。
 LUT_SHADER = '''shader_type canvas_item;
 uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;
+uniform sampler2D lut : filter_linear, repeat_disable;
+uniform float lut_contribution = 1.0;
 uniform float vignette_intensity = 0.297;
 uniform float vignette_smoothness = 0.2;
 uniform vec2 vignette_center = vec2(0.5, 0.5);
 
+// 标准 Unity 3D LUT 256x16: 16 格 x 16 行。格内=R 渐变(每格 16 px), 行=G 层, 格=B 层。
+vec3 lut_sample(vec3 c) {
+	vec3 v = clamp(c, vec3(0.0), vec3(1.0));
+	float g_step = v.g * 15.0;
+	float b_step = v.b * 15.0;
+	ivec2 g_row = ivec2(int(floor(g_step + 0.5)));
+	ivec2 b_col = ivec2(int(floor(b_step + 0.5)));
+	vec2 uv = vec2(
+		(float(b_col.x) * 16.0 + v.r * 15.0 + 0.5) / 256.0,
+		(15.0 - float(g_row.x) + 0.5) / 16.0);
+	return texture(lut, uv).rgb;
+}
+
 void fragment() {
 	vec4 c = texture(screen_tex, SCREEN_UV);
-	float lum = dot(c.rgb, vec3(0.299, 0.587, 0.114));
-	vec3 graded = vec3(
-		c.r * 1.04 + 0.012,
-		pow(c.g, 0.80) * 1.02 + 0.010,
-		pow(c.b, 0.75) * 0.95 + 0.005);
-	graded += vec3(0.040, 0.002, -0.009) * (1.0 - lum);
-	c.rgb = mix(c.rgb, graded, 1.0);
+	vec3 lut_out = lut_sample(c.rgb);
+	c.rgb = mix(c.rgb, lut_out, lut_contribution);
 	float d = distance(SCREEN_UV, vignette_center);
 	float falloff = smoothstep(1.0, 1.0 - vignette_intensity - vignette_smoothness, d);
 	c.rgb *= mix(1.0, falloff, vignette_intensity);
@@ -738,6 +827,10 @@ def main() -> int:
                                        'MinionOrWarlord,Tactic Container,Bg,arrow1,TutorialArrows'),
                     help='跳过名字包含这些子串的整棵子树 (逗号分隔)')
     ap.add_argument('--all-roots', action='store_true', help='不过滤根')
+    ap.add_argument('--light-energy', type=float, default=1.0,
+                    help='方向光能量校准系数 (Unity intensity 1.0 直通在 Godot 过曝; 黑军团等效 ~0.2-0.25)')
+    ap.add_argument('--ambient-energy', type=float, default=1.0,
+                    help='环境光能量校准系数 (Trilight intensity 0.41 直通偏亮时的等效系数)')
     args = ap.parse_args()
     skips = [s.strip() for s in args.skip.split(',') if s.strip()]
 
@@ -765,6 +858,10 @@ def main() -> int:
         if not os.path.exists(p) or open(p, encoding='utf-8').read() != LUT_SHADER:
             with open(p, 'w', encoding='utf-8') as f:
                 f.write(LUT_SHADER)
+        p2 = os.path.join(args.out, 'assets', 'uv_scroll.gdshader')
+        if not os.path.exists(p2) or open(p2, encoding='utf-8').read() != UV_SCROLL_SHADER:
+            with open(p2, 'w', encoding='utf-8') as f:
+                f.write(UV_SCROLL_SHADER)
 
     ensure_lut_shader()
 
@@ -775,10 +872,15 @@ def main() -> int:
             raw = None
             try:
                 raw = obj.export()
-                if raw is None and not isinstance(obj, dict):
-                    raw = obj.read().export()  # UnityPy 1.24 ObjectReader.export() 返回 None
             except Exception:
-                pass
+                raw = None
+            # UnityPy 版本差异: export() 可能返回 None 或抛 TypeError — 分开 try,
+            # 保证 read().export() 回退总能执行 (踩坑 2026-08-22: 同一 try 内回退被 except 吞掉)
+            if raw is None and not isinstance(obj, dict):
+                try:
+                    raw = obj.read().export()
+                except Exception:
+                    raw = None
             if raw:
                 os.makedirs(os.path.dirname(p), exist_ok=True)
                 tmp = p + '.tmp'
@@ -801,16 +903,17 @@ def main() -> int:
         mesh_paths[name] = res
         return res
 
-    def ensure_tex(mi):
-        if not mi.tex_name:
+    def ensure_tex(mi, which=1):
+        tn, to = (mi.tex_name, mi.tex_obj) if which == 1 else (mi.tex_name2, mi.tex_obj2)
+        if not tn:
             return None
-        safe = win_safe(mi.tex_name)
+        safe = win_safe(tn)
         p = os.path.join(args.out, 'assets', 'textures', safe + '.png')
         if not os.path.exists(p):
             os.makedirs(os.path.dirname(p), exist_ok=True)
             img = None
             try:
-                img = getattr(mi.tex_obj.read(), 'image', None)
+                img = getattr(to.read(), 'image', None)
             except Exception:
                 img = None
             if img is not None:
@@ -819,17 +922,17 @@ def main() -> int:
                 except Exception:
                     pass
             if not os.path.exists(p + '.tmp'):
-                src = os.path.join(a.TEXDIR, mi.tex_name + '.png')
+                src = os.path.join(a.TEXDIR, tn + '.png')
                 if os.path.exists(src):
                     import shutil
                     shutil.copy(src, p + '.tmp')
             if os.path.exists(p + '.tmp'):
                 p = dedupe_file(p, p + '.tmp', args.arena)
             else:
-                print('  [贴图导出失败] %s' % mi.tex_name)
+                print('  [贴图导出失败] %s' % tn)
                 return None
         res = 'res://assets/textures/' + os.path.basename(p)
-        tex_paths[mi.tex_name] = res
+        tex_paths[tn] = res
         return res
 
     # 收集用到的材质/粒子, 先落地贴图网格
@@ -840,6 +943,9 @@ def main() -> int:
         gopid = td.get('m_GameObject', {}).get('m_PathID')
         g = a.go(gopid)
         nm = str(g.get('m_Name', 'GO%d' % gopid))
+        # m_IsActive=0: 原版禁用 (如黑军团 CrosshairLine 3D/Cache Stealth) → 整树跳过
+        if g.get('m_IsActive', 1) not in (1, True, None):
+            return
         for sk in skips:
             if sk in nm:
                 return
@@ -855,6 +961,8 @@ def main() -> int:
                 for mi in mats:
                     if mi.tex_name and mi.tex_name not in tex_paths:
                         ensure_tex(mi)
+                    if mi.tex_name2 and mi.tex_name2 not in tex_paths:
+                        ensure_tex(mi, 2)
                 mesh_res = ensure_mesh(mesh_name, mesh_obj)
                 if mesh_res is None:
                     return  # 导出失败 → 跳过该网格节点及子树
@@ -975,6 +1083,20 @@ def main() -> int:
 
         def emit_mat(mi, mv):
             """材质创建行列表 (mv=材质变量名), 无贴图返回 None"""
+            if mi.tex_name2 and mi.tex_name2 in tex_paths:
+                # 双贴图 (Runes "Unlit UV scroll"): shader 双层 + TIME 滚动 (Vector4_1=(1,1,0.02,0))
+                lines = ['var %s := ShaderMaterial.new()' % mv]
+                lines.append('%s.shader = load("res://assets/uv_scroll.gdshader")' % mv)
+                lines.append('%s.set_shader_parameter("main_tex", load(%r))' % (mv, tex_paths[mi.tex_name]))
+                lines.append('%s.set_shader_parameter("secondary_tex", load(%r))' % (mv, tex_paths[mi.tex_name2]))
+                v4 = mi.vector4_1 or {}
+                sc = (float(v4.get('r', 1.0) or 1.0), float(v4.get('g', 1.0) or 1.0),
+                      float(v4.get('b', 0.0) or 0.0), float(v4.get('a', 0.0) or 0.0))
+                lines.append('%s.set_shader_parameter("uv_scroll", Vector4(%.3f, %.3f, %.3f, %.3f))' % (mv, *sc))
+                lines.append('%s.set_shader_parameter("layers_blend_opacity", 1.00)' % mv)
+                if mi.cull == 0:
+                    lines.append('%s.cull_mode = BaseMaterial3D.CULL_DISABLED' % mv)
+                return lines
             if not (mi.tex_name and mi.tex_name in tex_paths):
                 return None
             lines = ['var %s := StandardMaterial3D.new()' % mv]
@@ -1017,6 +1139,10 @@ def main() -> int:
                 w.line('\t%s.mesh = load(%r)' % (nv, mesh_paths[payload]))
                 for l in ml:
                     w.line('\t' + l)
+                # SkinnedMeshRenderer 薄片 (黑军团 Chain 链平面): 镜像 scale.x=-1 + yaw180 背面朝相机,
+                # cull_back 会被剔除 (原版单面可见) → SMR 网格强制双面
+                if a.has_smr(gopid):
+                    w.line('\t%s.cull_mode = BaseMaterial3D.CULL_DISABLED' % mv)
                 w.line('\t%s.material_override = %s' % (nv, mv))
                 emit_local(nv, tpid)
                 w.line('\t%s.add_child(%s)' % (parent_ref(parent_tpid), nv))
@@ -1067,14 +1193,15 @@ def main() -> int:
                 # Godot 灯照亮 = B·(0,0,-1) → B = R ⊗ RotX(-90)
                 qq = q_mul(q, (-0.70710678, 0.0, 0.0, 0.70710678))
                 w.line('\t%s.quaternion = Quaternion(%.6f, %.6f, %.6f, %.6f)' % (nv, qq[0], qq[1], qq[2], qq[3]))
-                # 校准: Unity URP 直通数值在 Godot Forward+ 下过曝 (实测地面 205 vs 主项目参考 45);
-                # light_energy 0.25 + 暖色校正 = 原版日光 × (1,0.957,0.839) (黑军团验证: 原版白光→含 LUT 暖调)
+                # 按说明书: Light m_Color(1,1,1) 白光 + m_Intensity 1.0 直通 (此前暖色修正的依据
+                # "原版白光→含 LUT 暖调" 已被推翻: ColorLookup=LUT Normal identity → 无暖调, 颜色零自造)
                 lc = ld.get('m_Color', {}) or {}
                 w.line('\t%s.light_color = Color(%.4f, %.4f, %.4f)' % (nv,
-                    float(lc.get('r', 1.0) or 1.0) * LIGHT_WARM_FACTOR[0],
-                    float(lc.get('g', 1.0) or 1.0) * LIGHT_WARM_FACTOR[1],
-                    float(lc.get('b', 1.0) or 1.0) * LIGHT_WARM_FACTOR[2]))
-                w.line('\t%s.light_energy = 0.25' % nv)
+                    float(lc.get('r', 1.0) or 1.0),
+                    float(lc.get('g', 1.0) or 1.0),
+                    float(lc.get('b', 1.0) or 1.0)))
+                # (黑军团验算: Unity 光强直通=过曝 2-3 倍, energy 作引擎物理等效校准, 颜色保持说明书值)
+                w.line('\t%s.light_energy = %.3f' % (nv, float(ld.get('m_Intensity', 1.0) or 1.0) * args.light_energy))
                 sh = ld.get('m_Shadows', {})
                 if sh.get('m_Type', 0) != 0 and ld.get('m_Type') == 1:
                     w.line('\t%s.shadow_enabled = true' % nv)
@@ -1090,41 +1217,79 @@ def main() -> int:
             w.line('\t%s.add_child(%s)' % (parent_ref(parent_tpid), nv))
             w.line('')
 
-        # 环境
+        # 环境 (按说明书 RenderSettings: m_AmbientMode=3 Trilight 三色 + m_AmbientIntensity 原值;
+        # URP Volume 无 Tonemapping 组件 → Linear 直出; Bloom(1.15/5.0) + Vignette(0.297/0.2) + ColorLookup(LUT))
         for r in a.REN.values():
             w.line('\tvar env := WorldEnvironment.new()')
             w.line('\tvar e := Environment.new()')
-            w.line('\te.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR')
-            # 逐变体 Trilight (m_AmbientSky/Equator/GroundColor) 平均 × 黑军团校准残差 (Filmic 下 0.24)
+            # 环境间接光 = RenderSettings m_AmbientProbe SH DC 项 (sh[0..2]=平均间接光 RGB;
+            # 黑军团 (0.289,0.183,-0.080) 暖橙! Trilight 三色仅天空盒配置, 单色平均会偏蓝 —
+            # 说明书完整读取: 环境光按 SH probe, 不是 Trilight 平均)。B<0 夹 0。
             sk, eq, gd = (r.get('m_AmbientSkyColor') or {}), (r.get('m_AmbientEquatorColor') or {}), (r.get('m_AmbientGroundColor') or {})
-            avg = tuple((float(sk.get(k, 1.0) or 1.0) + float(eq.get(k, 1.0) or 1.0) + float(gd.get(k, 1.0) or 1.0)) / 3.0
-                        for k in ('r', 'g', 'b'))
-            amb = tuple(a * f for a, f in zip(avg, AMB_TRILIGHT_FACTOR))
-            w.line('\te.ambient_light_color = Color(%.4f, %.4f, %.4f, 1.0000)' % amb)
-            w.line('\te.ambient_light_energy = 0.24')
+            probe = r.get('m_AmbientProbe') or {}
+            def _sh(i):
+                v = probe.get('sh[ %d]' % i) or probe.get('sh[%d]' % i)
+                return float(v) if v is not None else 1.0
+            sh_c = (_sh(0), _sh(1), _sh(2))
+            w.line('\te.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR')
+            w.line('\te.ambient_light_color = Color(%.4f, %.4f, %.4f, 1.0000)' %
+                   tuple(max(0.0, c) for c in sh_c))
+            # SH DC 已含强度 → energy 直通; --ambient-energy 做引擎等效校准
+            w.line('\te.ambient_light_energy = %.3f' % args.ambient_energy)
             if r.get('m_Fog'):
                 w.line('\te.fog_enabled = true')
                 w.line('\te.fog_light_color = ' + col_str(r.get('m_FogColor', {})))
                 w.line('\te.fog_density = %.5f' % float(r.get('m_FogDensity', 0.01)))
-            # Filmic: 保留 G/B (ACES 红移会把绿蓝压到 0.4/0.1, 与参考图暖黄基调不符)
-            w.line('\te.tonemap_mode = Environment.TONE_MAPPER_FILMIC')
+            # URP: Volume 无 Tonemapping 组件 → m_RenderPostProcessing 直出 = Linear (勿用 Filmic/ACES)
+            w.line('\te.tonemap_mode = Environment.TONE_MAPPER_LINEAR')
             w.line('\te.glow_enabled = true')
             w.line('\te.glow_intensity = 5.0')
             w.line('\te.glow_hdr_threshold = 1.15')
+            # URP Bloom skipIterations 6+maxIterations 6 ≈ 大扩散层; Godot 4.7 glow_levels/N 层强度
+            # (默认 L2/L3 近距叠加会泛白) → 只开最糊两层 L6+L7 (大范围柔光, 发光源内核仍亮)
+            w.line('\te.set("glow_levels/6", 1.0)')
+            w.line('\te.set("glow_levels/7", 1.0)')
+            w.line('\te.set("glow_levels/1", 0.0)')
+            w.line('\te.set("glow_levels/2", 0.0)')
+            w.line('\te.set("glow_levels/3", 0.0)')
+            w.line('\te.set("glow_levels/4", 0.0)')
+            w.line('\te.set("glow_levels/5", 0.0)')
             w.line('\te.background_mode = Environment.BG_COLOR')
             bg = bg_color or (0.0288, 0.0288, 0.0294)
             w.line('\te.background_color = Color(%.4f, %.4f, %.4f, 1)' % bg)
             w.line('\tenv.environment = e')
             w.line('\tenv.name = "Env"')
             w.line('\tadd_child(env)')
-            # 原版 Battle Arena 4 PostProcessing: ColorLookup(LUT Normal) + Vignette(0.297)
+            # 原版 Battle Arena 4 PostProcessing: ColorLookup(场景引用 LUT, contribution 1.0) + Vignette(0.297)
+            # layer=-1: LUT 只作用于 3D 画面, 不遮 HUD (主项目 HUD 在默认 canvas layer 0 之上)
             w.line('\tvar pp := CanvasLayer.new()')
+            w.line('\tpp.layer = -1')
             w.line('\tvar cr := ColorRect.new()')
             w.line('\tcr.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)')
+            w.line('\tcr.mouse_filter = Control.MOUSE_FILTER_IGNORE')
             w.line('\tvar pm := ShaderMaterial.new()')
             w.line('\tpm.shader = load("res://assets/lut_vignette.gdshader")')
-            if os.path.exists(os.path.join(args.out, 'assets', 'textures', 'LUT Normal.png')):
-                w.line('\tpm.set_shader_parameter("lut", load("res://assets/textures/LUT Normal.png"))')
+            lut_res = None
+            lref = a.lut_ref_val
+            if lref:
+                try:
+                    lobj = a.b.read_obj(lref, 'Texture2D')
+                    if lobj is not None:
+                        limg = getattr(lobj.read(), 'image', None)
+                        if limg is not None:
+                            ln = a.b.obj_name(lobj) or 'lut_%s' % lref.get('m_PathID')
+                            lp = os.path.join(args.out, 'assets', 'textures', win_safe(ln) + '.png')
+                            if not os.path.exists(lp):
+                                os.makedirs(os.path.dirname(lp), exist_ok=True)
+                                limg.save(lp + '.tmp', format='PNG')
+                                lp = dedupe_file(lp, lp + '.tmp', args.arena)
+                            lut_res = 'res://assets/textures/' + os.path.basename(lp)
+                except Exception:
+                    lut_res = None
+            if lut_res is None and os.path.exists(os.path.join(args.out, 'assets', 'textures', 'LUT Normal.png')):
+                lut_res = 'res://assets/textures/LUT Normal.png'  # 回退: LUT Blender 共享默认(黑军团)
+            if lut_res:
+                w.line('\tpm.set_shader_parameter("lut", load(%r))' % lut_res)
                 w.line('\tpm.set_shader_parameter("lut_contribution", 1.0)')
             w.line('\tpm.set_shader_parameter("vignette_intensity", 0.297)')
             w.line('\tpm.set_shader_parameter("vignette_smoothness", 0.2)')
@@ -1167,6 +1332,12 @@ def emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_expr='self',
     cm = ps.get('ColorModule', {}) or {}
     vm = ps.get('VelocityModule', {}) or {}
     rm = ps.get('RotationModule', {}) or {}
+    # UVModule 翻页分片 (Black Smoke 8x8/Floor Grill 6x5/FirePit 7x7/Smoke 6x5 等)
+    uvm = ps.get('UVModule', {}) or {}
+    uv_en = bool(uvm.get('enabled'))
+    tiles_x = int(uvm.get('tilesX', 1) or 1)
+    tiles_y = int(uvm.get('tilesY', 1) or 1)
+    uv_fps = float(uvm.get('fps', 30.0) or 30.0)
     # Godot GPUParticles3D 无 rate 属性: 池大小 = 平均存活粒子数 = rate × lifetime
     # (Unity maxNumParticles 是上限, 直接用作池会全池同时存活 → 粒子爆炸)
     rate_over_time = float(
@@ -1175,13 +1346,17 @@ def emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_expr='self',
     _pool = int(rate_over_time * max(_life_min, _life_max))
     if _pool > 0:
         amount = max(1, min(_pool, 800))
+        _burst_only = False
     else:
         # rate=0 的 burst 类: 用爆发总量, 上限 200 (Skull Eyes 等一次性粒子)
         _burst_total = 0
         for b in (em.get('m_Bursts', []) or []):
             if isinstance(b, dict):
                 _burst_total += int(curve_scalar(b.get('countCurve', {}), 10) or 10)
-        amount = max(1, min(_burst_total or 50, 200))
+        if _burst_total <= 0:
+            return  # rate=0 且无 burst: 原版不发粒子 (无需生成)
+        amount = max(1, min(_burst_total, 200))
+        _burst_only = True
     life_min, life_max = curve_min_max(im.get('startLifetime', {}), 1.0)
     lifetime = max(life_min, life_max)
     speed_min, speed_max = curve_min_max(im.get('startSpeed', {}), 0.0)
@@ -1204,8 +1379,11 @@ def emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_expr='self',
     w.line('\t%s.scale = Vector3(%.6f, %.6f, %.6f)' % (nv, sc[0], sc[1], sc[2]))
     w.line('\t%s.amount = %d' % (nv, max(amount, 1)))
     w.line('\t%s.lifetime = %.3f' % (nv, max(lifetime, 0.01)))
-    w.line('\t%s.one_shot = %s' % (nv, 'true' if not ps.get('looping', True) else 'false'))
+    # burst 类 (rate=0+bursts): 原版 cycleCount 一次性 → one_shot (Skull Eyes 闪一次)
+    w.line('\t%s.one_shot = %s' % (nv, 'true' if (_burst_only or not ps.get('looping', True)) else 'false'))
     w.line('\t%s.emitting = %s' % (nv, 'true' if ps.get('playOnAwake', True) else 'false'))
+    # simulationSpeed 直通 (光柱 0.3/毒气 0.4/烟 0.75/气体 1.5 — 此前丢失全按 1.0)
+    w.line('\t%s.speed_scale = %.3f' % (nv, float(ps.get('simulationSpeed', 1.0) or 1.0)))
     if ps.get('prewarm', False):
         w.line('\t%s.preprocess = %.2f' % (nv, float(ps.get('lengthInSec', 5.0) or 5.0) *
                                            float(ps.get('simulationSpeed', 1.0) or 1.0)))
@@ -1254,12 +1432,19 @@ def emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_expr='self',
                 return curve_scalar(mc, 0.0) if isinstance(mc, dict) else 0.0
             return 0.0
         vx_, vy_, vz_ = vof(vm.get('x')), vof(vm.get('y')), vof(vm.get('z'))
-        if vx_ or vy_ or vz_:
-            w.line('\t%s.direction = Vector3(%.3f, %.3f, %.3f)' % (pmv, vx_, vy_, vz_))
+        # Unity velocity-over-lifetime 恒速 (world) → Godot: direction=归一化方向 +
+        # initial_velocity=速率 (仅 direction 无初速 → 粒子钉死不动, 原版热浪/绿气恒漂)
+        vlen = math.sqrt(vx_ * vx_ + vy_ * vy_ + vz_ * vz_)
+        if vlen > 0.001:
+            w.line('\t%s.direction = Vector3(%.4f, %.4f, %.4f)' % (pmv, vx_ / vlen, vy_ / vlen, vz_ / vlen))
+            w.line('\t%s.initial_velocity_min = %.3f' % (pmv, vlen))
+            w.line('\t%s.initial_velocity_max = %.3f' % (pmv, vlen))
     else:
         w.line('\t%s.direction = Vector3(0, 1, 0)' % pmv)
     g = curve_scalar(im.get('gravityModifier', {}), 0.0)
     w.line('\t%s.gravity = Vector3(0, %.3f, 0)' % (pmv, -9.81 * g))
+    if uv_en and tiles_x > 1 and tiles_y > 1:
+        w.line('\t%s.anim_speed = Vector2(%.1f, %.1f)' % (pmv, uv_fps, uv_fps))
     # Godot 粒子 scale 直接乘 draw-pass 尺寸: quad.size=1, scale=Unity 直径 (startSize)
     w.line('\t%s.scale_min = %.4f' % (pmv, size_min))
     w.line('\t%s.scale_max = %.4f' % (pmv, size_max))
@@ -1341,26 +1526,22 @@ def emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_expr='self',
                 w.line('\t%s.blend_mode = BaseMaterial3D.BLEND_MODE_ADD' % mmv)
             else:
                 use_lit = smoke_lit(mi)
-                if use_lit and mi.tex_name:
-                    # 烟材质: 原贴图 RGB≈0.2灰 × 暗棕 albedo 双重相乘≈黑 → 用 RGB白版(保留alpha)由 albedo 定色
-                    w.line('\t%s.albedo_texture = load(%r)' % (mmv, white_paths.get(
-                        mi.tex_name, 'res://assets/textures/white_%s.png' % mi.tex_name)))
-                elif mi.tex_name and mi.tex_name in tex_paths:
+                # 说明书: 烟/气粒子材质为 Unlit 粒子着色器, 颜色=startColor×colorMod×贴图RGB(0.2灰)
+                # → unshaded + 原版贴图 + albedo 白 (受光会洗色; 暗棕 albedo 会双重乘黑)
+                if mi.tex_name and mi.tex_name in tex_paths:
                     w.line('\t%s.albedo_texture = load(%r)' % (mmv, tex_paths[mi.tex_name]))
-                if use_lit:
-                    w.line('\t%s.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL' % mmv)
-                else:
-                    w.line('\t%s.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED' % mmv)
+                w.line('\t%s.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED' % mmv)
                 w.line('\t%s.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA' % mmv)
                 w.line('\t%s.cull_mode = BaseMaterial3D.CULL_DISABLED' % mmv)
                 if mi.blend >= 2:
                     w.line('\t%s.blend_mode = BaseMaterial3D.BLEND_MODE_ADD' % mmv)
-                if use_lit:
-                    # 烟/蒸汽: 原版材质 BaseColor=黑 但被环境光染成暗棕 (参考图实测 ~(55,25,20))
-                    # PER_PIXEL + 全黑 albedo 会不可见, 按实测暖棕标定
-                    w.line('\t%s.albedo_color = %s' % (mmv, COLOR_LIT_TINT))
-                elif mi.base_color or mi.mat_color:
+                if mi.base_color or mi.mat_color:
                     w.line('\t%s.albedo_color = %s' % (mmv, col_str(mi.base_color or mi.mat_color)))
+            # UVModule 翻页分片: 材质分帧 + loop (anim_speed 已在 pmv 设置)
+            if uv_en and tiles_x > 1 and tiles_y > 1:
+                w.line('\t%s.particles_anim_h_frames = %d' % (mmv, tiles_x))
+                w.line('\t%s.particles_anim_v_frames = %d' % (mmv, tiles_y))
+                w.line('\t%s.particles_anim_loop = true' % mmv)
             w.line('\t%s.material = %s' % (qmv, mmv))
         w.line('\t%s.draw_pass_1 = %s' % (nv, qmv))
     w.line('\t%s.add_child(%s)' % (parent_expr, nv))
