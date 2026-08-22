@@ -28,7 +28,12 @@ Material/ParticleSystem/ParticleSystemRenderer/Camera/Light/RenderSettings JSON,
 
 用法:
   py312/python.exe unity_scene_to_godot.py --arena battlearenablacklegion
-  py312/python.exe unity_scene_to_godot.py --arena battlearenablacklegion --out d:/2/战场演示
+  py312/python.exe unity_scene_to_godot.py --arena battlearena2 --out d:/2/战场演示
+  (--roots 留空 = 按子树含量自动识别 3D 根: 各变体根名不统一, 名字过滤会漏 battlearena2/leviathan)
+多变体要点 (2026-08-22):
+  - 资源同名异内容: 'Combined Mesh (root: scene)'/Flame03/Atlas 等跨变体常见 → 内容哈希去重, 不同则 <名>__<arena> 后缀
+  - 环境逐变体读 m_AmbientSky/Equator/GroundColor (平均×AMB_TRILIGHT_FACTOR), 光色=m_Color×LIGHT_WARM_FACTOR
+  - 相机 m_Enabled=0 (reflection camera) → enabled=false; 背景色取 3D 相机 m_BackGroundColor
 """
 import argparse
 import json
@@ -51,6 +56,11 @@ SHARED_PACKS = ['battlesharedresources_assets_all.bundle',
                 'battleprefabs_vfxandmisc_assets_all.bundle',
                 'atlasindividual_assets_battleatlasui.bundle',
                 'boosterpacks_assets_all.bundle']
+# Trilight 平均 → Godot 平坦环境色校准残差 (黑军团实测值: 平均(0.638,0.631,0.892)→发射(0.674,0.641,0.870))
+# 逐变体读取 m_AmbientSky/Equator/GroundColor 平均后乘此因子, 黑军团再生=原校准值不变
+AMB_TRILIGHT_FACTOR = (1.0559, 1.0160, 0.9759)
+# 太阳暖色校正: 黑军团验证 = 原版白日光 × (1, 0.957, 0.839) (Filmic 压缩 G/B 的 LUT 补偿)
+LIGHT_WARM_FACTOR = (1.0, 0.957, 0.839)
 
 
 # ---------------------------------------------------------------- JSON 读取
@@ -274,10 +284,21 @@ class BundleResolver:
         for o in env.objects:
             t = o.type.name
             if t in ('Mesh', 'Texture2D', 'Material'):
-                try:
-                    target.setdefault(t, {})[o.path_id] = o.read()
-                except Exception:
-                    pass
+                target.setdefault(t, {})[o.path_id] = o
+
+    def obj_name(self, o):
+        """对象名: dict(本地MAT JSON) 或 UnityPy ObjectReader (read_typetree 元数据, 不解码数据)"""
+        if o is None:
+            return ''
+        if isinstance(o, dict):
+            return str(o.get('m_Name', ''))
+        try:
+            return str(o.read_typetree().get('m_Name', ''))
+        except Exception:
+            try:
+                return str(o.read().m_Name)
+            except Exception:
+                return ''
 
     def _cab_map(self):
         if os.path.exists(CAB_MAP_CACHE):
@@ -300,25 +321,38 @@ class BundleResolver:
             json.dump(m, f, ensure_ascii=False, indent=1)
         return m
 
-    def read_obj(self, ref):
+    def read_obj(self, ref, want=None):
         fid = ref.get('m_FileID', 0)
         pid = ref.get('m_PathID')
         if pid in (None, 0):
             return None
-        if fid in (0, 3):
+        # 本地优先: 各变体 dripped JSON 的 fid 语义不一 (0/3=本地; 也有 2/5/6=本地),
+        # 本地能命中就直接返回 (darkangels fid2 pid34='Background space' 等); want=期望类型防跨类型撞号
+        if want:
+            d = self.local.get(want)
+            if d and pid in d:
+                return d[pid]
+        else:
             for d in self.local.values():
                 if pid in d:
                     return d[pid]
-            return self._find_ext(pid)
+        if fid in (0, 3):
+            found = self._find_ext(pid, want)
+            if found is not None:
+                return found
         # 外部引用: 先按 externals CAB→bundle 候选扫, 再扫固定共享包 (头部扫描映射不可靠)
+        # (fid 0/3 也会走到这里 — dripped JSON 的 fid 语义不一, 贴图常在 battlesharedresources)
         cab = self.ext.get(fid)
         bundles = list(self.cab_map.get(cab, [])) if cab else []
         for bname in SHARED_PACKS:
             if bname not in bundles:
                 bundles.append(bname)
-        return self._scan_bundles(pid, bundles)
+        found = self._scan_bundles(pid, bundles, want)
+        if found is not None:
+            return found
+        return self._find_ext(pid, want)
 
-    def _scan_bundles(self, pid, bundles):
+    def _scan_bundles(self, pid, bundles, want=None):
         for bname in bundles:
             if bname not in self.ext_index:
                 try:
@@ -331,29 +365,40 @@ class BundleResolver:
             idx = self.ext_index.get(bname)
             if not idx:
                 continue
-            for d in idx.values():
-                if pid in d:
+            if want:
+                d = idx.get(want)
+                if d and pid in d:
                     return d[pid]
+            else:
+                for d in idx.values():
+                    if pid in d:
+                        return d[pid]
         return None
 
-    def _find_ext(self, pid):
+    def _find_ext(self, pid, want=None):
         for idx in self.ext_index.values():
             if not idx:
                 continue
-            for d in idx.values():
-                if pid in d:
+            if want:
+                d = idx.get(want)
+                if d and pid in d:
                     return d[pid]
+            else:
+                for d in idx.values():
+                    if pid in d:
+                        return d[pid]
         return None
 
     def mat_data(self, ref):
         """external Material → dict (UnityPy typed 对象直接读 m_SavedProperties)"""
-        obj = self.read_obj(ref)
+        obj = self.read_obj(ref, 'Material')
         if obj is None:
             return None
         if isinstance(obj, dict):
             return obj
-        # typed Material 对象: 转 dict (m_SavedProperties 等属性)
+        # typed Material 对象 → read(): m_SavedProperties 转 dict
         try:
+            obj = obj.read()
             sp = getattr(obj, 'm_SavedProperties', None)
             if sp is None:
                 return None
@@ -470,10 +515,10 @@ class Assembler:
             mf = self.MF.get(c)
             if mf:
                 ref = mf.get('m_Mesh', {})
-                obj = self.b.read_obj(ref)
+                obj = self.b.read_obj(ref, 'Mesh')
                 if obj is None:
                     return None, None
-                return str(getattr(obj, 'm_Name', 'mesh%d' % ref.get('m_PathID'))), obj
+                return (self.b.obj_name(obj) or 'mesh%d' % ref.get('m_PathID')), obj
         return None, None
 
     def mats_of(self, gopid):
@@ -498,9 +543,9 @@ class Assembler:
             raw = self.b.mat_data(ref)
         mi = parse_mat(raw, 'mat_%s' % pid) if raw else None
         if mi and mi.tex_ref:
-            obj = self.b.read_obj(mi.tex_ref)
+            obj = self.b.read_obj(mi.tex_ref, 'Texture2D')
             if obj is not None:
-                mi.tex_name = str(getattr(obj, 'm_Name', '') or 'tex_%s' % mi.tex_ref.get('m_PathID'))
+                mi.tex_name = self.b.obj_name(obj) or 'tex_%s' % mi.tex_ref.get('m_PathID')
                 mi.tex_obj = obj
         self.mat_cache[key] = mi
         return mi
@@ -527,6 +572,31 @@ class Assembler:
     def has_comp(self, gopid, comps):
         return any(c in comps for c in self.go_comps.get(gopid, []))
 
+    def subtree_has_3d(self, tpid, seen=frozenset()):
+        """子树内是否含可见 3D (PS/相机/灯/带材质网格) — 自动识别 3D 根用
+        (各变体根名不统一: Scrap_4/Battle Arena X Baked/Particle Effects/Scenario/BattlePrefab)"""
+        if tpid in seen:
+            return False
+        seen = seen | {tpid}
+        gopid = self.TF[tpid].get('m_GameObject', {}).get('m_PathID')
+        comps = self.go_comps.get(gopid, [])
+        for c in comps:
+            if c in self.PS or c in self.CAM or c in self.LIG:
+                return True
+            if c in self.MF and self.MF[c].get('m_Mesh', {}).get('m_PathID'):
+                return True
+            if c in self.MR and self.MR[c].get('m_Materials'):
+                return True
+        for ch in self.TF[tpid].get('m_Children', []):
+            cid = ch.get('m_PathID')
+            if cid in self.TF:
+                if self.subtree_has_3d(cid, seen):
+                    return True
+        return False
+
+    def auto_roots(self):
+        return [tp for tp in self.root_transforms() if self.subtree_has_3d(tp)]
+
 
 # ---------------------------------------------------------------- GDScript 写器
 class GdWriter:
@@ -543,7 +613,7 @@ class GdWriter:
 
     def next_id(self, prefix):
         self._var += 1
-        return '%s%d' % (prefix, self._var)
+        return '%s_%d' % (prefix, self._var)
 
 
 def mat_gd(w, var, mi, tex_paths):
@@ -595,12 +665,65 @@ void fragment() {
 '''
 
 
+def win_safe(s):
+    """Windows 文件名消毒: ':' 会被 NTFS 当 ADS 流 ('Combined Mesh (root: scene)' → 数据写进隐藏流=不可见)
+    *?\"<>| 同样非法; '/'→'_' 防止目录穿越"""
+    return re.sub(r'[\/:*?"<>|]', '_', s)[:80]
+
+
+def res_to_fs(out, res):
+    return os.path.join(out, res[len('res://'):].replace('/', os.sep))
+
+
+def dedupe_file(final_p, tmp_p, arena):
+    """同名资源内容去重: 内容相同→复用已有; 内容不同→落 <name>__<arena> 后缀
+    (各变体贴图/网格同名异内容很常见: 'Combined Mesh (root: scene)'/'Flame03'/'Atlas' 等)"""
+    import hashlib
+    if not os.path.exists(final_p):
+        os.replace(tmp_p, final_p)
+        return final_p
+    h1 = hashlib.md5(open(final_p, 'rb').read()).hexdigest()
+    h2 = hashlib.md5(open(tmp_p, 'rb').read()).hexdigest()
+    if h1 == h2:
+        os.remove(tmp_p)
+        return final_p
+    d = os.path.dirname(final_p)
+    stem, ext = os.path.splitext(os.path.basename(final_p))
+    alt = os.path.join(d, '%s__%s%s' % (stem, arena, ext))
+    if os.path.exists(alt):
+        os.remove(alt)
+    os.replace(tmp_p, alt)
+    return alt
+
+
+def make_white_tex(fp, wp):
+    """烟材质的白版贴图: RGB→255 保留 alpha (原贴图 RGB≈0.2 灰 × 暗棕 albedo 双重乘≈黑不可见;
+    原版做法=发光白烟由 albedo 定色)"""
+    if os.path.exists(wp):
+        return
+    try:
+        from PIL import Image
+    except Exception:
+        return
+    try:
+        img = Image.open(fp).convert('RGBA')
+    except Exception:
+        return
+    px = img.load()
+    w, h = img.size
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = px[x, y]
+            px[x, y] = (255, 255, 255, a)
+    img.save(wp)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--arena', default='battlearenablacklegion')
     ap.add_argument('--out', default='d:/2/战场演示')
-    ap.add_argument('--roots', default='Scenario,Baked,BattlePrefab',
-                    help='只保留根名包含这些子串的 (逗号分隔)')
+    ap.add_argument('--roots', default='',
+                    help='只保留根名包含这些子串的 (逗号分隔); 留空=按子树含量自动识别 3D 根 (推荐)')
     ap.add_argument('--skip', default=('Scene Initializer,BattleManager,EnvironmentConditions,'
                                        'Battle Events,BattleHud,BattleTipController,Cinemachine,'
                                        'PlayerBoardArea,EnemyBoardArea,Particle colliders,'
@@ -622,14 +745,19 @@ def main() -> int:
     print('=== %s | GO %d, TF %d, PS %d, MAT %d' % (
         args.arena, len(a.GO), len(a.TF), len(a.PS), len(a.MAT)))
     roots = a.root_transforms()
-    if not args.all_roots:
+    if args.all_roots:
+        pass
+    elif args.roots:
         roots = [t for t in roots if any(
             k in a.go(a.TF[t].get('m_GameObject', {}).get('m_PathID')).get('m_Name', '')
             for k in args.roots.split(','))]
+    else:
+        roots = a.auto_roots()
     print('根: %s' % sorted(a.go(a.TF[t].get('m_GameObject', {}).get('m_PathID')).get('m_Name', '?') for t in roots))
 
     # ---- 资源落地 ----
     mesh_paths, tex_paths = {}, {}
+    white_paths = {}  # mi.tex_name → 白版烟贴图 res (RGB 白保留 alpha)
 
     def ensure_lut_shader():
         p = os.path.join(args.out, 'assets', 'lut_vignette.gdshader')
@@ -641,47 +769,66 @@ def main() -> int:
     ensure_lut_shader()
 
     def ensure_mesh(name, obj):
-        safe = name.replace('/', '_')[:80]
+        safe = win_safe(name)
         p = os.path.join(args.out, 'assets', 'meshes', safe + '.obj')
         if not os.path.exists(p):
-            os.makedirs(os.path.dirname(p), exist_ok=True)
             raw = None
             try:
                 raw = obj.export()
+                if raw is None and not isinstance(obj, dict):
+                    raw = obj.read().export()  # UnityPy 1.24 ObjectReader.export() 返回 None
             except Exception:
                 pass
             if raw:
-                with open(p, 'w', encoding='utf-8', errors='replace') as f:
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                tmp = p + '.tmp'
+                with open(tmp, 'w', encoding='utf-8', errors='replace') as f:
                     f.write(raw)
-                fix_obj_normals(p)
+                fix_obj_normals(tmp)
+                p = dedupe_file(p, tmp, args.arena)
+                imp = p + '.import'
+                if os.path.exists(imp):
+                    os.remove(imp)
+            else:
+                print('  [网格导出失败] %s' % name)
+                return None
         elif not obj_valid(p):
             fix_obj_normals(p)
             imp = p + '.import'
             if os.path.exists(imp):
                 os.remove(imp)
-        res = 'res://assets/meshes/' + safe + '.obj'
+        res = 'res://assets/meshes/' + os.path.basename(p)
         mesh_paths[name] = res
         return res
 
     def ensure_tex(mi):
         if not mi.tex_name:
             return None
-        safe = mi.tex_name.replace('/', '_')[:80]
+        safe = win_safe(mi.tex_name)
         p = os.path.join(args.out, 'assets', 'textures', safe + '.png')
         if not os.path.exists(p):
             os.makedirs(os.path.dirname(p), exist_ok=True)
-            img = getattr(mi.tex_obj, 'image', None)
+            img = None
+            try:
+                img = getattr(mi.tex_obj.read(), 'image', None)
+            except Exception:
+                img = None
             if img is not None:
                 try:
-                    img.save(p)
+                    img.save(p + '.tmp', format='PNG')  # PIL 按扩展名判格式, .tmp 需显式
                 except Exception:
                     pass
-            elif not os.path.exists(p):
+            if not os.path.exists(p + '.tmp'):
                 src = os.path.join(a.TEXDIR, mi.tex_name + '.png')
                 if os.path.exists(src):
                     import shutil
-                    shutil.copy(src, p)
-        res = 'res://assets/textures/' + safe + '.png'
+                    shutil.copy(src, p + '.tmp')
+            if os.path.exists(p + '.tmp'):
+                p = dedupe_file(p, p + '.tmp', args.arena)
+            else:
+                print('  [贴图导出失败] %s' % mi.tex_name)
+                return None
+        res = 'res://assets/textures/' + os.path.basename(p)
         tex_paths[mi.tex_name] = res
         return res
 
@@ -708,7 +855,9 @@ def main() -> int:
                 for mi in mats:
                     if mi.tex_name and mi.tex_name not in tex_paths:
                         ensure_tex(mi)
-                ensure_mesh(mesh_name, mesh_obj)
+                mesh_res = ensure_mesh(mesh_name, mesh_obj)
+                if mesh_res is None:
+                    return  # 导出失败 → 跳过该网格节点及子树
                 payload = mesh_name
         elif a.has_ps(gopid):
             ps, render_mode, mref, mats = a.ps_of(gopid)
@@ -719,13 +868,23 @@ def main() -> int:
                         ensure_tex(mi)
                         if mi.tex_name not in tex_paths:
                             print('  [粒子贴图缺失] %s' % mi.tex_name)
+                    if mi.tex_name and mi.tex_name in tex_paths and smoke_lit(mi):
+                        # 白版烟贴图 (RGB→白保留 alpha): 原贴图灰 0.2×暗棕 albedo≈黑不可见
+                        fp = res_to_fs(args.out, tex_paths[mi.tex_name])
+                        wp = os.path.join(os.path.dirname(fp), 'white_' + os.path.basename(fp))
+                        make_white_tex(fp, wp)
+                        if os.path.exists(wp):
+                            white_paths[mi.tex_name] = 'res://assets/textures/' + os.path.basename(wp)
                 payload = (ps, render_mode, mref, mats)
                 # renderMode=4 (Mesh): 粒子用网格 draw pass (Light Shaft Plane1x1 等)
                 if render_mode == 4 and mref and mref.get('m_PathID'):
-                    mo = a.b.read_obj(mref)
+                    mo = a.b.read_obj(mref, 'Mesh')
                     if mo is not None:
-                        mn = str(getattr(mo, 'm_Name', '') or 'psmesh%d' % mref.get('m_PathID'))
-                        payload = (ps, render_mode, (mn, ensure_mesh(mn, mo)), mats)
+                        mn = a.b.obj_name(mo) or 'psmesh%d' % mref.get('m_PathID')
+                        mesh_res = ensure_mesh(mn, mo)
+                        if mesh_res is None:
+                            return  # draw mesh 导出失败 → 跳过该粒子
+                        payload = (ps, render_mode, (mn, mesh_res), mats)
                         print('  [粒子 draw mesh] %s' % mn)
         elif a.has_comp(gopid, a.CAM):
             kind = 'camera'
@@ -838,6 +997,7 @@ def main() -> int:
             lines.append('%s.roughness = 0.9' % mv)
             return lines
 
+        bg_color = None  # 3D 相机 (BoardCamera) 的 m_BackGroundColor, 供环境背景用
         for kind, tpid, gopid, nm, payload, parent_tpid in all_nodes:
             nv = node_var(gopid)
             cam_added = False
@@ -863,9 +1023,13 @@ def main() -> int:
                 w.line('')
                 continue
             elif kind == 'particle':
-                emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_ref(parent_tpid))
+                emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_ref(parent_tpid), white_paths)
                 continue
             elif kind == 'camera':
+                cd = next(a.CAM[c] for c in a.go_comps[gopid] if c in a.CAM)
+                if not cd.get('m_Enabled', 1):
+                    print('  [跳过禁用相机] %s' % nm)
+                    continue  # reflection camera (原版 enabled=0) 不生成 — 否则先入树成 current 抢渲染
                 w.line('\tvar %s := Camera3D.new()' % nv)
                 w.line('\t%s.name = %r' % (nv, nm))
                 cd = next(a.CAM[c] for c in a.go_comps[gopid] if c in a.CAM)
@@ -885,7 +1049,10 @@ def main() -> int:
                 w.line('\t%s.far = %.4f' % (nv, float(cd.get('far clip plane', 300.0))))
                 # CinemachineVirtualCamera m_Lens.LensShift.y=-0.205 → Godot frustum_offset
                 if cd.get('m_LensShift', {}).get('y'):
-                    w.line('\t%s.frustum_offset = Vector2(0, %.4f)' % (nv, -0.205 * 0.86))
+                    w.line('\t%s.frustum_offset = Vector2(0, %.4f)' % (nv, float(cd.get('m_LensShift').get('y')) * 0.86))
+                if bg_color is None and 'UI' not in nm:
+                    bc = cd.get('m_BackGroundColor') or {}
+                    bg_color = (float(bc.get('r', 0.0288)), float(bc.get('g', 0.0288)), float(bc.get('b', 0.0294)))
                 w.line('\tself.add_child(%s)  # 相机挂在镜像根之外' % nv)
                 w.line('')
                 cam_added = True
@@ -901,8 +1068,12 @@ def main() -> int:
                 qq = q_mul(q, (-0.70710678, 0.0, 0.0, 0.70710678))
                 w.line('\t%s.quaternion = Quaternion(%.6f, %.6f, %.6f, %.6f)' % (nv, qq[0], qq[1], qq[2], qq[3]))
                 # 校准: Unity URP 直通数值在 Godot Forward+ 下过曝 (实测地面 205 vs 主项目参考 45);
-                # light_energy 0.25 + 暖色 (主项目已验证参考; 原版淡暖阳氛围)
-                w.line('\t%s.light_color = Color(1.0000, 0.9570, 0.8390)' % nv)
+                # light_energy 0.25 + 暖色校正 = 原版日光 × (1,0.957,0.839) (黑军团验证: 原版白光→含 LUT 暖调)
+                lc = ld.get('m_Color', {}) or {}
+                w.line('\t%s.light_color = Color(%.4f, %.4f, %.4f)' % (nv,
+                    float(lc.get('r', 1.0) or 1.0) * LIGHT_WARM_FACTOR[0],
+                    float(lc.get('g', 1.0) or 1.0) * LIGHT_WARM_FACTOR[1],
+                    float(lc.get('b', 1.0) or 1.0) * LIGHT_WARM_FACTOR[2]))
                 w.line('\t%s.light_energy = 0.25' % nv)
                 sh = ld.get('m_Shadows', {})
                 if sh.get('m_Type', 0) != 0 and ld.get('m_Type') == 1:
@@ -924,8 +1095,12 @@ def main() -> int:
             w.line('\tvar env := WorldEnvironment.new()')
             w.line('\tvar e := Environment.new()')
             w.line('\te.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR')
-            # 原版 Trilight 环境 (m_AmbientSky/Equator/Ground): 上暖下蓝, 混合后蓝紫补 G/B (Filmic 下校准 0.24)
-            w.line('\te.ambient_light_color = Color(0.6740, 0.6410, 0.8700, 1.0000)')
+            # 逐变体 Trilight (m_AmbientSky/Equator/GroundColor) 平均 × 黑军团校准残差 (Filmic 下 0.24)
+            sk, eq, gd = (r.get('m_AmbientSkyColor') or {}), (r.get('m_AmbientEquatorColor') or {}), (r.get('m_AmbientGroundColor') or {})
+            avg = tuple((float(sk.get(k, 1.0) or 1.0) + float(eq.get(k, 1.0) or 1.0) + float(gd.get(k, 1.0) or 1.0)) / 3.0
+                        for k in ('r', 'g', 'b'))
+            amb = tuple(a * f for a, f in zip(avg, AMB_TRILIGHT_FACTOR))
+            w.line('\te.ambient_light_color = Color(%.4f, %.4f, %.4f, 1.0000)' % amb)
             w.line('\te.ambient_light_energy = 0.24')
             if r.get('m_Fog'):
                 w.line('\te.fog_enabled = true')
@@ -937,7 +1112,8 @@ def main() -> int:
             w.line('\te.glow_intensity = 5.0')
             w.line('\te.glow_hdr_threshold = 1.15')
             w.line('\te.background_mode = Environment.BG_COLOR')
-            w.line('\te.background_color = Color(0.0288, 0.0288, 0.0294, 1)')
+            bg = bg_color or (0.0288, 0.0288, 0.0294)
+            w.line('\te.background_color = Color(%.4f, %.4f, %.4f, 1)' % bg)
             w.line('\tenv.environment = e')
             w.line('\tenv.name = "Env"')
             w.line('\tadd_child(env)')
@@ -947,8 +1123,9 @@ def main() -> int:
             w.line('\tcr.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)')
             w.line('\tvar pm := ShaderMaterial.new()')
             w.line('\tpm.shader = load("res://assets/lut_vignette.gdshader")')
-            w.line('\tpm.set_shader_parameter("lut", load("res://assets/textures/LUT Normal.png"))')
-            w.line('\tpm.set_shader_parameter("lut_contribution", 1.0)')
+            if os.path.exists(os.path.join(args.out, 'assets', 'textures', 'LUT Normal.png')):
+                w.line('\tpm.set_shader_parameter("lut", load("res://assets/textures/LUT Normal.png"))')
+                w.line('\tpm.set_shader_parameter("lut_contribution", 1.0)')
             w.line('\tpm.set_shader_parameter("vignette_intensity", 0.297)')
             w.line('\tpm.set_shader_parameter("vignette_smoothness", 0.2)')
             w.line('\tcr.material = pm')
@@ -979,8 +1156,9 @@ def smoke_lit(mi):
     return bool(re.search(r'(?i)smoke|steam|wispy', n)) and not re.search(r'(?i)additive|glow|ember|fire', n)
 
 
-def emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_expr='self'):
+def emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_expr='self', white_paths=None):
     ps, render_mode, mref, mats = payload
+    white_paths = white_paths or {}
     mi = mats[0] if mats else None
     im = ps.get('InitialModule', {}) or {}
     em = ps.get('EmissionModule', {}) or {}
@@ -1165,7 +1343,8 @@ def emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_expr='self')
                 use_lit = smoke_lit(mi)
                 if use_lit and mi.tex_name:
                     # 烟材质: 原贴图 RGB≈0.2灰 × 暗棕 albedo 双重相乘≈黑 → 用 RGB白版(保留alpha)由 albedo 定色
-                    w.line('\t%s.albedo_texture = load(%r)' % (mmv, 'res://assets/textures/white_%s.png' % mi.tex_name))
+                    w.line('\t%s.albedo_texture = load(%r)' % (mmv, white_paths.get(
+                        mi.tex_name, 'res://assets/textures/white_%s.png' % mi.tex_name)))
                 elif mi.tex_name and mi.tex_name in tex_paths:
                     w.line('\t%s.albedo_texture = load(%r)' % (mmv, tex_paths[mi.tex_name]))
                 if use_lit:
