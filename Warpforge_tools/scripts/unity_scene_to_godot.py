@@ -100,6 +100,34 @@ def q_mul(a, b):
     )
 
 
+def q_rot_vec(q, v):
+    """四元数 (x,y,z,w) 旋转向量 v"""
+    x, y, z, w = q
+    vx, vy, vz = v
+    tx = 2.0 * (y * vz - z * vy)
+    ty = 2.0 * (z * vx - x * vz)
+    tz = 2.0 * (x * vy - y * vx)
+    return (vx + w * tx + y * tz - z * ty,
+            vy + w * ty + z * tx - x * tz,
+            vz + w * tz + x * ty - y * tx)
+
+
+def reflect_z_q(q):
+    """Z 反射共轭: R' = M·R·M (M=diag(1,1,-1)) → 四元数 (x,y,z,w)→(-x,-y,z,w).
+    Unity(左手系, +Z 前) 数据放进 Godot(右手系, -Z 前) 的标准转换:
+    整世界内容进 scale=(1,1,-1) 根 (z 镜像, Godot 自动翻绕序),
+    相机移出镜像根: 位置 z 取反 + 四元数 Z 反射共轭 (无需 Y180).
+    只给相机转 Y180 而不做世界镜像 = 画面水平镜像 (左右互换, 本战场 bug 根因)."""
+    return (-q[0], -q[1], q[2], q[3])
+
+
+def reflect_x_q(q):
+    """X 反射共轭: M=diag(-1,1,1), R' = M·R·M → 四元数 (x,y,z,w)→(x,-y,-z,w).
+    Unity (左手系, +Z 前) 导出数据 → Godot (右手系, -Z 前) 必须整世界 X 反射,
+    OBJ 顶点+绕序同时反射, 否则画面水平镜像 (相机 Y180 只转正朝向, 无法修手性)."""
+    return (q[0], -q[1], -q[2], q[3])
+
+
 def curve_min_max(v, default=1.0):
     if isinstance(v, dict):
         if v.get('minMaxState', 0) == 0:
@@ -736,6 +764,14 @@ def main() -> int:
         w.line('func _build() -> void:')
         w.line('\tposition = Vector3(-100, 0, 0)  # 原版世界 x 基准 100 → 场景原点')
         w.line('')
+        w.line('\t# Unity(左手系, 相机+X 朝屏幕右)→Godot(右手系): 内容整体做一次 X 镜像')
+        w.line('\t# (绕相机 x=100 平面; 相机移出镜像根, 见下方 camera 分支), 否则画面左右互换')
+        w.line('\tvar mirror := Node3D.new()')
+        w.line("\tmirror.name = 'MirrorX'")
+        w.line('\tmirror.position = Vector3(200.0, 0.0, 0.0)')
+        w.line('\tmirror.scale = Vector3(-1.0, 1.0, 1.0)')
+        w.line('\tself.add_child(mirror)')
+        w.line('')
 
         mat_line_buf = []  # 材质创建行 (每网格内联)
         used_names = {}
@@ -745,15 +781,31 @@ def main() -> int:
             return 'n_%d' % gopid
 
         def parent_ref(pt):
-            """父变换节点变量名 (根/父被跳过时为 self)"""
+            """父变换节点变量名 (根/父被跳过时挂镜像根 mirror; 相机单独挂 self, 见 camera 分支)"""
             if pt is None:
-                return 'self'
+                return 'mirror'
             for k, tp2, gp2, nm2, py2, pp2 in all_nodes:
                 if tp2 == pt:
                     if k == 'skip-mesh':
-                        return 'self'
+                        return 'mirror'
                     return node_var(gp2)
-            return 'self'
+            return 'mirror'
+
+        def world_chain(tpid):
+            """沿 m_Father 链连乘局部 pos/quat (链上 scale 均为 1) → 场景根系世界变换"""
+            chain = []
+            cur = tpid
+            while cur is not None and cur in a.TF:
+                chain.append(a.local_trans(cur))
+                cur = a.TF[cur].get('m_Father', {}).get('m_PathID')
+            p = (0.0, 0.0, 0.0)
+            q = (0.0, 0.0, 0.0, 1.0)
+            for lt in reversed(chain):
+                lp, lq = lt[0:3], lt[3]
+                rp = q_rot_vec(q, lp)
+                p = (p[0] + rp[0], p[1] + rp[1], p[2] + rp[2])
+                q = q_mul(q, lq)
+            return p, q
 
         def emit_local(tvar, tpid):
             lt = a.local_trans(tpid)
@@ -788,6 +840,7 @@ def main() -> int:
 
         for kind, tpid, gopid, nm, payload, parent_tpid in all_nodes:
             nv = node_var(gopid)
+            cam_added = False
             if kind == 'skip-mesh':
                 continue
             if kind == 'mesh':
@@ -816,13 +869,15 @@ def main() -> int:
                 w.line('\tvar %s := Camera3D.new()' % nv)
                 w.line('\t%s.name = %r' % (nv, nm))
                 cd = next(a.CAM[c] for c in a.go_comps[gopid] if c in a.CAM)
-                lt = a.local_trans(tpid)
-                pos, q, sc = (lt[0], lt[1], lt[2]), lt[3], lt[4]
-                w.line('\t%s.position = Vector3(%.4f, %.4f, %.4f)' % (nv, pos[0], pos[1], pos[2]))
-                # Unity 相机 +Z 朝前, Godot Camera3D 朝 -Z → Y+180 (上/滚转保持)
-                qq = q_mul((0.0, 1.0, 0.0, 0.0), q)
+                # 相机必须移出镜像根 (mirror 是反射, 相机带反射基 = 画面再次镜像);
+                # 位置 = 镜像世界坐标 (100 - p_u.x), 旋转 = conjX(q_u) ⊗ Y180
+                # (推导: R_g = M·R_u·D, M=reflect_x, D=RotX(180°) 手性修正)
+                wp, wq = world_chain(tpid)
+                w.line('\t%s.position = Vector3(%.4f, %.4f, %.4f)' % (nv, 200.0 - wp[0], wp[1], wp[2]))
+                # conjX(q) = (x, -y, -z, w)  (M·R·M 反射共轭)
+                qq = q_mul((wq[0], -wq[1], -wq[2], wq[3]), (0.0, 1.0, 0.0, 0.0))
                 w.line('\t%s.quaternion = Quaternion(%.6f, %.6f, %.6f, %.6f)' % (nv, qq[0], qq[1], qq[2], qq[3]))
-                w.line('\t%s.scale = Vector3(%.6f, %.6f, %.6f)' % (nv, sc[0], sc[1], sc[2]))
+                w.line('\t%s.scale = Vector3(%.6f, %.6f, %.6f)' % (nv, 1.0, 1.0, 1.0))
                 fov = cd.get('field of view')
                 if fov:
                     w.line('\t%s.fov = %.3f' % (nv, float(fov)))
@@ -831,6 +886,9 @@ def main() -> int:
                 # CinemachineVirtualCamera m_Lens.LensShift.y=-0.205 → Godot frustum_offset
                 if cd.get('m_LensShift', {}).get('y'):
                     w.line('\t%s.frustum_offset = Vector2(0, %.4f)' % (nv, -0.205 * 0.86))
+                w.line('\tself.add_child(%s)  # 相机挂在镜像根之外' % nv)
+                w.line('')
+                cam_added = True
             elif kind == 'light':
                 w.line('\tvar %s := DirectionalLight3D.new()' % nv)
                 w.line('\t%s.name = %r' % (nv, nm))
@@ -855,6 +913,8 @@ def main() -> int:
                 emit_local(nv, tpid)
                 w.line('\t%s.add_child(%s)' % (parent_ref(parent_tpid), nv))
                 w.line('')
+                continue
+            if cam_added:
                 continue
             w.line('\t%s.add_child(%s)' % (parent_ref(parent_tpid), nv))
             w.line('')
