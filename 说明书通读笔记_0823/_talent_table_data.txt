@@ -1,0 +1,165 @@
+SHARED_START
+AstraMilitarum	Efficiency and Excellence	2	None	1	Ephemeral
+AstraMilitarum	Lead by Example	2	rare	2	Ephemeral
+AstraMilitarum	Legendary Commandant	2	epic	3	Ephemeral
+AstraMilitarum	Lord Commander	2	None	None	Ephemeral
+AstraMilitarum	Renowned Bodyguard	1	legendary	4	Ephemeral
+BlackLegion	Bitter Blows	3	legendary	4	Ephemeral
+BlackLegion	Helspear Assault	2	rare	2	Ephemeral, Blast, Slay
+BlackLegion	Litany of Despair	2	legendary	4	Ephemeral, Vulnerable, Backlash, Dark Pact
+BlackLegion	Rites of Possession	2	epic	3	Ephemeral
+DarkAngels	Master Interromancer	1	None	1	Ephemeral
+DarkAngels	Master of Manoeuvre	1	None	1	Ephemeral
+DarkAngels	Master of Repentance	1	None	None	Ephemeral
+DarkAngels	Master of the Deathwing	2	epic	3	Ephemeral
+DarkAngels	Refuse to Yield	2	defence	4	Ephemeral
+Genestealers	Brood Prophet	2	epic	3	Ephemeral
+Genestealers	Deadliest Killer	2	legendary	4	None
+Genestealers	Experimental Bio-Horrors	1	epic	3	None
+Genestealers	Inscrutable Cunning	2	legendary	4	Ephemeral
+Genestealers	Master Outrider	2	None	1	Ephemeral, Sniper, Slay
+Genestealers	Vox-Hacker	1	epic	3	None
+Goff	Da Red Waaagh	2	None	1	Ephemeral
+Goff	Follower of Gork	2	None	1	Ephemeral
+Goff	Mekaniak	2	None	1	Ephemeral
+Goff	Uge Choppa	2	None	1	Ephemeral
+Goff	Worst Temper	1	None	1	Ephemeral
+Leviathan	Aerial Seeding	0	common	1	Ephemeral
+Leviathan	Alpha Warrior	2	legendary	4	Ephemeral, Flying
+Leviathan	Brood Progenitor	1	rare	2	Ephemeral
+Leviathan	Hive Commander	2	legendary	4	Ephemeral
+Leviathan	Spirit Leech	1	epic	3	Ephemeral
+Leviathan	Synaptic Imperative	2	legendary	4	Ephemeral
+SaimHann	Empyric Ambush	2	defence	4	Ephemeral, Stealth
+SaimHann	Flickerjump	0	defence	4	Ephemeral
+SaimHann	Path of Command	2	rare	2	Ephemeral
+SaimHann	Path of the Seer	1	epic	3	Ephemeral
+SaimHann	Path of the Warrior	2	legendary	4	Ephemeral
+SaimHann	Skyborne Deployment	1	rare	2	Ephemeral
+SaimHann	Storm of Silence	2	legendary	4	Ephemeral
+SaimHann	Witchfire	0	epic	3	Ephemeral
+SaimHann	Wrath of Khaine	2	legendary	4	Ephemeral
+Sautekh	Hardwired Destruction	2	legendary	4	None
+Sautekh	Indomitable Will	1	legendary	4	Ephemeral
+Sautekh	Lord of the Storm	2	legendary	4	Ephemeral
+Sautekh	Particle Whip	6	epic	3	Ephemeral
+Sautekh	Reanimate	1	common	1	Ephemeral
+Sautekh	Relentless March	2	rare	2	Ephemeral
+Sororitas	Daemonbreaker	2	legendary	4	Adepta Sororitas
+Sororitas	Fury of the Righteous	2	rare	2	Ephemeral
+Sororitas	Hymn of Battle	2	epic	3	Ephemeral
+Sororitas	Lead the Righteous	2	epic	3	Ephemeral
+Sororitas	Righteous Repugnance	2	legendary	4	None
+SpaceWolves	High Rune Priest	2	epic	3	Ephemeral
+TauEmpire	Deploy Anchors	4	rare	2	Ephemeral
+TauEmpire	Drone Companion	1	rare	2	Ephemeral
+TauEmpire	Grisly Feast	2	None	1	Ephemeral
+TauEmpire	Hero of the Empire	1	legendary	4	Ephemeral
+TauEmpire	Homing Beacon	4	epic	3	Ephemeral, Flank
+TauEmpire	Serene Unifier	2	epic	3	Ephemeral
+TauEmpire	Shield Generator	0	rare	2	Ephemeral
+TauEmpire	Structural Analyzer	3	legendary	4	Ephemeral
+Ultramarines	Angel's Wrath	1	None	1	Ephemeral
+Ultramarines	Author of the Codex	2	defence	4	Ephemeral
+Ultramarines	Exemplary Warrior	2	None	None	Ephemeral
+Ultramarines	Exhortation of Rage	2	legendary	4	Ephemeral
+Ultramarines	Greatest Deeds	2	legendary	4	Ephemeral
+Ultramarines	Master Tactician	2	None	1	Ephemeral
+Ultramarines	Master of Arcana	1	epic	3	Ephemeral
+Ultramarines	Master of the Fleet	2	rare	2	Ephemeral
+Ultramarines	Spear of Macragge	1	legendary	4	Ephemeral
+SHARED_END
+UNIQ_START
+EmperorsChildren	Duelist's Hubris (Lucius' Talent)	1	None	1	Tactic
+EmperorsChildren	Euphoric Strike (Lord Exultant's Talent)	1	rare	2	Event
+EmperorsChildren	Excessive Vigour (Daemon Prince's Talent)	2	epic	3	Spell
+Goff	Da Bigger Dey Iz... (Mozrog's Talent)	2	None	1	Warlord
+Goff	Dok’s Toolz (Painboss' talent)	2	None	1	Spell
+Goff	Ferocious Rage (Beastboss' Talent)	2	None	1	Upgrade
+Goff	Special Dose (Zodgrod Wortsnagga Talent)	1	None	1	Spell
+Goff	Waaagh! Energy (Weirdboy Talent)	0	None	1	Tactic
+UNIQ_END
+SRC_START
+AstraMilitarum	Commissar Elan	hero	Lead by Example
+AstraMilitarum	Hektor Thenmann	hero	Efficiency and Excellence
+AstraMilitarum	Lord Solar Leontus	hero	Lord Commander
+AstraMilitarum	Nork Deddog	unit	Renowned Bodyguard
+AstraMilitarum	Ursula Creed	hero	Legendary Commandant
+BlackLegion	Ghallaron the Pious	hero	Litany of Despair
+BlackLegion	Ghallaron's Champion	unit	Bitter Blows
+BlackLegion	Haarken Worldclaimer	hero	Helspear Assault
+BlackLegion	Master of Possession	unit	Rites of Possession
+BlackLegion	Sorcerer	unit	A random Black Legion Psychic Power
+BlackLegion	Sylar Hexcorn	hero	A random Black Legion Psychic Power
+DarkAngels	Asmodai	hero	Master of Repentance
+DarkAngels	Belial	hero	Master of the Deathwing
+DarkAngels	Ezekiel	unit	Master Interromancer
+DarkAngels	Master Zacharial	hero	Refuse to Yield
+DarkAngels	Sammael	unit	Master of Manoeuvre
+EmperorsChildren	Lord Kaphrael	hero	Euphoric Strike
+EmperorsChildren	Lucius The Eternal	hero	Duelist's Hubris
+EmperorsChildren	Xarahan Daemon Prince	hero	Excessive Vigour
+Genestealers	Biophagus	unit	Experimental Bio-Horrors
+Genestealers	Clamavus	unit	Vox-Hacker
+Genestealers	Lhaska Szenari	hero	Master Outrider
+Genestealers	Magus Uthrel Naas	hero	Brood Prophet
+Genestealers	Patriarch	unit	Deadliest Killer
+Genestealers	Primus Saffa Rhiannor	hero	Inscrutable Cunning
+Goff	Ardshell Gurk	unit	Follower of Gork
+Goff	Boss Zagstruk	hero	Worst Temper
+Goff	Grukk Face-Rippa	hero	Da Red Waaagh
+Goff	Mekboy Gazmek	unit	Mekaniak
+Goff	Mozrog Skragbad	hero	Da Bigger Dey Iz
+Goff	Painboss	unit	Dok's Toolz
+Goff	Warboss Gordrang	hero	Uge Choppa
+Goff	Weirdboy	unit	Waaagh! Energy
+Leviathan	Hive Tyrant	unit	Synaptic Imperative
+Leviathan	Neurothrope	hero	Spirit Leech
+Leviathan	SwarmLord	hero	Hive Commander
+Leviathan	Terror of Vardenghast	hero	Alpha Warrior
+Leviathan	Tervigon	hero	Brood Progenitor
+Leviathan	Tyrannocyte	unit	Aerial Seeding
+SaimHann	Anvirr Keltoc	hero	Path of the Seer
+SaimHann	Avatar of Khaine	unit	Wrath of Khaine
+SaimHann	Eliac Zephyrblade	hero	Path of the Warrior
+SaimHann	Jain Zar	hero	Storm of Silence
+SaimHann	Lhykhis	hero	Empyric Ambush
+SaimHann	Medreyal Ghaelyn	hero	Path of Command
+SaimHann	Orian Laratharjos	unit	Flickerjump
+SaimHann	Wave Serpent	unit	Skyborne Deployment
+SaimHann	Witchblade Warlock	unit	Witchfire
+Sautekh	Canoptek Reanimator	unit	Reanimate
+Sautekh	Chronomancer	unit	Reanimate
+Sautekh	Command Barge	unit	Reanimate
+Sautekh	Ghost Ark	unit	Reanimate
+Sautekh	HB	hero	Lord of the Storm
+Sautekh	Monolith	unit	Particle Whip
+Sautekh	Necron Lord	unit	Indomitable Will
+Sautekh	Nemesor Zahndrekh	hero	Relentless March
+Sautekh	Ramatekh The Cruel	hero	Hardwired Destruction
+Sautekh	stormlord	hero	Lord of the Storm
+Sororitas	Celestian Sacresant Aveline	hero	Daemonbreaker
+Sororitas	Erika Luminas	hero	Fury of the Righteous
+Sororitas	Junith Eruita	hero	Lead the Righteous
+Sororitas	Missionary	unit	Hymn of Battle
+Sororitas	Morvenn Vahl	hero	Righteous Repugnance
+SpaceWolves	Njal Stormcaller	hero	High Rune Priest
+TauEmpire	Aunshi Ethereal	unit	Serene Unifier
+TauEmpire	Commander O'Maisos	hero	Drone Companion
+TauEmpire	Darkstrider	unit	Structural Analyzer
+TauEmpire	Honoured Ethereal	unit	Serene Unifier
+TauEmpire	Riptide Battlesuit	unit	Shield Generator
+TauEmpire	Shadowsun	hero	Hero of the Empire
+TauEmpire	Stealth Battlesuit	unit	Homing Beacon
+TauEmpire	Stormsurge Battlesuit	unit	Deploy Anchors
+TauEmpire	War Shaper	hero	Grisly Feast
+Ultramarines	Antaro Chronus	unit	Spear of Macragge
+Ultramarines	Captain Sicarius	unit	Greatest Deeds
+Ultramarines	Chaplain Letharius	hero	Exhortation of Rage
+Ultramarines	Lieutenant Titus	hero	Exemplary Warrior
+Ultramarines	Marneus Calgar	hero	Master Tactician
+Ultramarines	Roboute Guilliman	hero	Author of the Codex
+Ultramarines	Uriel Ventris	hero	Master of the Fleet
+Ultramarines	Valius Paxor	hero	Angel's Wrath
+Ultramarines	Varro Tigurius	hero	Master of Arcana
+SRC_END
