@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Warpforge 视觉副模型 MCP Server（stdio）。
 
-通过 MiniMax M3（OpenCode Go 订阅，OpenAI 兼容 API）识别本地卡图/图片/视频。
+通过 DeepSeek 视觉模型（deepseek-v4-flash-vision-exp，OpenAI 兼容 API）
+识别本地卡图/图片/视频。2026-08-21 由 MiniMax M3（OpenCode Go）切换而来。
 - 环境变量：
-  MINIMAX_API_KEY  必填（key 只从环境读取，绝不写入任何文件/日志）
-  MINIMAX_BASE_URL 默认 https://opencode.ai/zen/go/v1（OpenCode Go；可覆盖为官方或中转）
-  MINIMAX_MODEL    默认 MiniMax-M3（首次真实调用自动探测 /models 修正）
-  MINIMAX_MOCK     =1 时进入 mock 模式（不调 API，供无 key 冒烟测试）
+  DEEPSEEK_API_KEY  必填（key 只从环境读取，绝不写入任何文件/日志；cc-switch DeepSeek 供应商同 key）
+  DEEPSEEK_BASE_URL 默认 https://api.deepseek.com/v1（DeepSeek 官方；可覆盖为中转）
+  DEEPSEEK_MODEL    默认 deepseek-v4-flash-vision-exp（有视觉能力的 DeepSeek 模型）
+  DEEPSEEK_MOCK     =1 时进入 mock 模式（不调 API，供无 key 冒烟测试）
+  （迁移期兼容：未设 DEEPSEEK_* 时回退 MINIMAX_*，MINIMAX_API_KEY 亦可作为 key 兜底）
 - 工具：
   vision_analyze(image_path, prompt)        单图/单视频识别（视频自动抽帧）
   vision_batch(inputs|directory, template)  批量识别（并发/错误隔离/摘要）
@@ -14,7 +16,7 @@
   vision_media(media_path, prompt)          通用媒体识别：图片直发；视频 PyAV 抽帧(≤8帧)多图分析
 - 视频处理：PyAV 内置 ffmpeg 抽帧（每 2s 一帧，长边 1024 JPEG，≤8 帧），
   走已验证的图像多图能力，不依赖 API 的视频 content 类型。
-  若未来实测 API 原生支持视频 content（MINIMAX_VIDEO_DIRECT=1 可切换直发）。
+  若未来实测 API 原生支持视频 content（DEEPSEEK_VIDEO_DIRECT=1 可切换直发）。
 安全：stdout 只输出 JSON-RPC 帧；日志走 stderr（WARNING，不含 key）；API 错误截断 500 字符。
 """
 import os
@@ -40,12 +42,17 @@ logging.basicConfig(stream=sys.stderr, level=logging.WARNING,
 log = logging.getLogger("vision")
 
 # ---------------- 配置 ----------------
-BASE_URL = os.environ.get("MINIMAX_BASE_URL", "https://opencode.ai/zen/go/v1").strip().rstrip("/")
-DEFAULT_MODEL = os.environ.get("MINIMAX_MODEL", "MiniMax-M3").strip()
-MOCK = os.environ.get("MINIMAX_MOCK") == "1"
+# 2026-08-21 起默认 DeepSeek 视觉模型；未设 DEEPSEEK_* 时回退旧 MINIMAX_*（迁移期兼容）
+BASE_URL = os.environ.get("DEEPSEEK_BASE_URL") or os.environ.get(
+    "MINIMAX_BASE_URL", "https://api.deepseek.com/v1").strip().rstrip("/")
+DEFAULT_MODEL = os.environ.get("DEEPSEEK_MODEL") or os.environ.get(
+    "MINIMAX_MODEL", "deepseek-v4-flash-vision-exp").strip()
+MOCK = (os.environ.get("DEEPSEEK_MOCK") or os.environ.get("MINIMAX_MOCK")) == "1"
 ART_ROOT = r"d:/2/解包整理"
 ALLOWED_EXT = {".png", ".jpg", ".jpeg", ".webp"}
 MAX_BYTES = 6 * 1024 * 1024
+AUTO_DOWNSCALE_BYTES = 1024 * 1024   # >1MB 自动 PIL 降采样 (DeepSeek 实测 ~1.15MB PNG 被拒)
+MAX_SEND_SIDE = 1024                 # 降采样后长边
 MAX_BATCH = 50
 DEFAULT_CONCURRENCY = 2
 DEFAULT_TIMEOUT = 180
@@ -56,7 +63,7 @@ MAX_VIDEO_FRAMES = 8          # 最多抽帧数 (控制 token)
 VIDEO_SAMPLE_SEC = 2.0        # 抽样间隔
 VIDEO_MAX_BYTES = 120 * 1024 * 1024  # 视频上限 120MB (抽帧后只传 JPEG)
 FRAME_MAX_SIDE = 1024         # 抽帧长边
-VIDEO_DIRECT = os.environ.get("MINIMAX_VIDEO_DIRECT") == "1"  # 未来直发视频开关
+VIDEO_DIRECT = os.environ.get("DEEPSEEK_VIDEO_DIRECT") == "1" or os.environ.get("MINIMAX_VIDEO_DIRECT") == "1"  # 未来直发视频开关
 
 try:
     import av  # PyAV (内置 ffmpeg): 视频抽帧
@@ -90,11 +97,33 @@ def _endpoints():
 
 
 def _api_key():
+    """key 获取顺序：DEEPSEEK_API_KEY 环境变量 → cc-switch 本机库 DeepSeek 供应商
+    token（用户当前供应商已存，避免重复存放/复制）→ 旧 MINIMAX_API_KEY 兜底。
+    只读环境/本机配置，绝不写入文件或日志。"""
+    key = os.environ.get("DEEPSEEK_API_KEY") or ""
+    if key:
+        return key
+    try:
+        import sqlite3 as _sq
+        _db = _sq.connect(os.path.expanduser(r"~/.cc-switch/cc-switch.db"))
+        try:
+            for (_cfg,) in _db.execute(
+                "SELECT settings_config FROM providers "
+                "WHERE name='DeepSeek' AND app_type='claude'"
+            ).fetchall():
+                _k = json.loads(_cfg).get("env", {}).get("ANTHROPIC_AUTH_TOKEN", "")
+                if _k:
+                    return _k
+        finally:
+            _db.close()
+    except Exception:
+        pass
     return os.environ.get("MINIMAX_API_KEY") or ""
 
 
 def _detect_model():
-    """GET /models 探测实际型号名（lazy，首次真实调用前执行一次）。"""
+    """GET /models 探测实际型号名（lazy，首次真实调用前执行一次）。
+    DeepSeek：若默认模型在列表则用之；不在则警告并保留默认（exp 模型可能不在列表）。"""
     global _model_checked, _model_final
     with _model_lock:
         if _model_checked:
@@ -118,7 +147,7 @@ def _detect_model():
             if DEFAULT_MODEL in ids:
                 _model_final = DEFAULT_MODEL
                 return _model_final
-            cand = [i for i in ids if "minimax" in i.lower() and ("m3" in i.lower() or "m2" in i.lower())]
+            cand = [i for i in ids if "vision" in i.lower() or "vl" in i.lower()]
             if cand:
                 _model_final = cand[0]
                 log.warning("模型 %s 不在列表，已切换为探测到的 %s", DEFAULT_MODEL, _model_final)
@@ -141,7 +170,8 @@ def _resolve_path(p):
 
 
 def _read_image(p):
-    """返回 (data_uri, error_code, error_msg)。"""
+    """返回 (data_uri, error_code, error_msg)。DeepSeek 对大图/大文件会拒（实测 >~1.5MB 失败），
+    超过阈值自动用 PIL 降采样到长边 MAX_SEND_SIDE（保留 PNG 无损，文字/UI 不糊）。"""
     path = _resolve_path(p)
     if not path:
         return None, "file", f"文件不存在: {p}"
@@ -156,7 +186,26 @@ def _read_image(p):
             raw = f.read()
     except OSError as e:
         return None, "file", f"读取失败: {e}"
-    return "data:image/" + ext[1:] + ";base64," + base64.b64encode(raw).decode("ascii"), None, None
+    if size > AUTO_DOWNSCALE_BYTES:
+        try:
+            from PIL import Image as _PILImage
+            import io as _io
+            _im = _PILImage.open(path).convert("RGBA")
+            _w, _h = _im.size
+            if max(_w, _h) > MAX_SEND_SIDE:
+                _s = MAX_SEND_SIDE / float(max(_w, _h))
+                _im = _im.resize((int(round(_w * _s)), int(round(_h * _s))),
+                                 _PILImage.LANCZOS)
+            _buf = _io.BytesIO()
+            _im.save(_buf, "PNG")
+            raw = _buf.getvalue()
+        except Exception:
+            pass  # PIL 不可用则原样发送
+    # DeepSeek 严格校验 mime：.jpg 必须声明 image/jpeg（image/jpg 会被 400 拒绝）
+    _mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+             "webp": "image/webp"}
+    return ("data:" + _mime.get(ext[1:], "image/" + ext[1:]) + ";base64,"
+            + base64.b64encode(raw).decode("ascii")), None, None
 
 
 # ---------------- 视频处理 (PyAV 抽帧) ----------------
@@ -224,7 +273,7 @@ def _read_media(p):
     return None, "file", f"不支持的媒体格式: {ext} (支持 {sorted(ALLOWED_EXT | VIDEO_EXT)})"
 
 
-# ---------------- MiniMax 调用 ----------------
+# ---------------- DeepSeek 视觉模型调用 ----------------
 def _call_once(prompt, data_uris, timeout):
     """单次调用（支持多图）。返回 (text, error_code, error_msg)。"""
     if MOCK:
@@ -235,7 +284,7 @@ def _call_once(prompt, data_uris, timeout):
                 f"图片 {len(data_uris)} 张，数据长度 {sum(len(u) for u in data_uris)} 字符。"), None, None
     key = _api_key()
     if not key:
-        return None, "api", "MINIMAX_API_KEY 未设置。请先在系统环境变量设置（setx MINIMAX_API_KEY <key>），然后重启 Claude Code。"
+        return None, "api", "DEEPSEEK_API_KEY 未设置。请先在系统环境变量设置（setx DEEPSEEK_API_KEY <key>），然后重启 Claude Code。"
     model = _detect_model()
     content = [{"type": "text", "text": prompt}]
     content += [{"type": "image_url", "image_url": {"url": u}} for u in data_uris]
@@ -243,7 +292,7 @@ def _call_once(prompt, data_uris, timeout):
         "model": model,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0.2,
-        "max_tokens": 1024,
+        "max_tokens": 4096,  # DeepSeek 推理模型: reasoning_content 也吃预算, 1024 会被推理耗尽致 content 为空
     }
     url, _ = _endpoints()
     req = urllib.request.Request(

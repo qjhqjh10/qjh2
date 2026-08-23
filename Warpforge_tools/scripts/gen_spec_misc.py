@@ -76,7 +76,7 @@ def gen_battle():
 
     # --- 战斗 HUD 说明 ---
     hud = ['# 战斗 HUD 说明 (battlearena1 2D 层)\n',
-           '> 完整 2D 全树: [battlearena1_2D层全树.md](battlearena1_2D层全树.md) (854 行, dump_scene_tree.py 生成)',
+           '> 完整 2D 全树: [2D层_battlearena1全树.md](2D层_battlearena1全树.md) (854 行, dump_scene_tree.py 生成)',
            '> 本文件按功能分组导读\n',
            '',
            '## 层结构',

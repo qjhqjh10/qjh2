@@ -2,8 +2,11 @@
 """
 convert_unity_particles.py — Unity ParticleSystem JSON → Godot 粒子中间格式
 输入: 特效名 (GO 名, 如 AttackHitSmall) 或 ParticleSystem JSON 路径 (可多个)
-输出: D:/warpforge/data/particles/<名>.json (简化参数) + 纹理 (从 bundle 或解包目录)
+输出: D:/warpforge/data/particles/<名>.json (2D 简化参数, 拍平由 unity_particles.gd 做)
+      --3d 模式: D:/warpforge/data/particles3d/<名>.json (3D 世界空间, 保留形状/速度/挂点偏移, unity_particles3d.gd 读取)
+      + 纹理 (从 bundle 或解包目录)
 用法: py312/python.exe scripts/convert_unity_particles.py AttackHitSmall Actual_Explosion ...
+      py312/python.exe scripts/convert_unity_particles.py --3d AttackHitSmall ...
 """
 import json
 import glob
@@ -15,6 +18,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 PREFAB = r'D:\2\解包整理\08_预制体特效\战斗预制体'
 SHARED = r'D:\2\解包整理\08_预制体特效\共享资源'
 OUT_JSON = r'D:\warpforge\data\particles'
+OUT_JSON3D = r'D:\warpforge\data\particles3d'
 OUT_TEX = r'D:\warpforge\assets\particles'
 BUNDLE_DIR = 'd:/2/Warhammer 40k Warpforge/Warpforge_Data/StreamingAssets/aa/StandaloneWindows64/'
 
@@ -26,13 +30,15 @@ def find_files(d, fname, pid):
     return out
 
 
-def cv(v):
+def cv(v, default=None):
     """MinMaxCurve → 常数 (scalar / minScalar 优先)"""
     if isinstance(v, dict):
         st = v.get('minMaxState', 0)
         if st == 0:
-            return v.get('scalar')
-        return v.get('minScalar')
+            return v.get('scalar') if v.get('scalar') is not None else default
+        return v.get('minScalar') if v.get('minScalar') is not None else default
+    if v is None:
+        return default
     return v
 
 
@@ -127,7 +133,20 @@ def find_ps_recursive(go_name, depth=0):
     return None
 
 
-def convert_effect(go_name):
+def load_go_transform(comps):
+    """GO 组件列表 → 根 Transform localPosition/localScale (特效挂点偏移/缩放, 3D 模式用)"""
+    for c in comps:
+        for f in glob.glob(os.path.join(PREFAB, 'Transform', f'*_{c}.json')):
+            if f.endswith(f'_{c}.json') and not f.endswith(f'_{c}_{c}.json'):
+                tr = json.load(open(f, encoding='utf-8'))
+                pos = tr.get('m_LocalPosition', {})
+                sc = tr.get('m_LocalScale', {})
+                return [pos.get('x', 0), pos.get('y', 0), pos.get('z', 0)], \
+                       [sc.get('x', 1), sc.get('y', 1), sc.get('z', 1)]
+    return [0, 0, 0], [1, 1, 1]
+
+
+def convert_effect(go_name, as3d=False):
     """按 GO 名转换特效: GO → ParticleSystem + Renderer → Material → 纹理 (组合特效递归子 GO)"""
     go_files = glob.glob(os.path.join(PREFAB, 'GameObject', go_name + '*.json')) or \
                globals().get('go_files', [])
@@ -254,48 +273,97 @@ def convert_effect(go_name):
         tex_final = os.path.join(OUT_TEX, go_name + '_frame.png')
         crop.save(tex_final)
     sc = im.get('startColor', {})
-    out = {
-        "name": go_name,
-        "system_lifetime": ps.get('lengthInSec', 1.0),
-        "one_shot": not bool(ps.get('looping', False)),
-        "play_on_awake": bool(ps.get('playOnAwake', True)),
-        "amount": im.get('maxNumParticles', 100),
-        "lifetime": cv(im.get('startLifetime')) or 1.0,
-        "speed_min": cv(im.get('startSpeed')) or 0.0,
-        "speed_max": cv(im.get('startSpeed')) or 0.0,
-        "size_min": cv(im.get('startSize')) or 1.0,
-        "size_max": cv(im.get('startSize')) or 1.0,
-        "gravity": cv(im.get('gravityModifier')) or 0.0,
-        "color_min": [sc.get('minColor', {}).get(k, 1.0) for k in 'rgba'] if sc.get('minColor') else [1, 1, 1, 1],
-        "color_max": [sc.get('maxColor', {}).get(k, 1.0) for k in 'rgba'] if sc.get('maxColor') else [1, 1, 1, 1],
-        "emission_rate": cv(em.get('rateOverTime')) or 0.0,
-        "bursts": bursts,
-        "shape_type": ps.get('ShapeModule', {}).get('shapeType'),
-        "render_mode": render_mode,
-        "size_over_lifetime": size_curve,
-        "color_over_lifetime": color_curve,
-        "texture": ("res://assets/particles/" + os.path.basename(tex_final)) if tex_final else "",
-    }
-    os.makedirs(OUT_JSON, exist_ok=True)
-    fp = os.path.join(OUT_JSON, go_name + '.json')
+    if as3d:
+        # ── 3D 世界空间输出 (unity_particles3d.gd 读取) ──
+        offset, escale = load_go_transform(comps)
+        shp = ps.get('ShapeModule', {})
+        shape = {
+            'type': shp.get('shapeType', 0),
+            'radius': cv(shp.get('radius'), 1),
+            'radiusThickness': cv(shp.get('radiusThickness'), 1),
+            'angle': cv(shp.get('angle'), 0),
+            'scale': [cv(shp.get('scale', {}).get('x'), 1), cv(shp.get('scale', {}).get('y'), 1),
+                      cv(shp.get('scale', {}).get('z'), 1)] if isinstance(shp.get('scale'), dict) else [1, 1, 1],
+        }
+        life = cv(im.get('startLifetime')) or 1.0
+        spd = cv(im.get('startSpeed')) or 0.0
+        sz = cv(im.get('startSize')) or 1.0
+        out = {
+            "name": go_name,
+            "effect_offset": [round(v, 3) for v in offset],
+            "effect_scale": [round(v, 3) for v in escale],
+            "system_lifetime": ps.get('lengthInSec', 1.0),
+            "one_shot": not bool(ps.get('looping', False)),
+            "play_on_awake": bool(ps.get('playOnAwake', True)),
+            "amount": im.get('maxNumParticles', 100),
+            "lifetime_min": life,
+            "lifetime_max": life,
+            "speed_min": spd,
+            "speed_max": spd,
+            "size_min": sz,
+            "size_max": sz,
+            "gravity": cv(im.get('gravityModifier')) or 0.0,
+            "color_min": [sc.get('minColor', {}).get(k, 1.0) for k in 'rgba'] if sc.get('minColor') else [1, 1, 1, 1],
+            "color_max": [sc.get('maxColor', {}).get(k, 1.0) for k in 'rgba'] if sc.get('maxColor') else [1, 1, 1, 1],
+            "emission_rate": cv(em.get('rateOverTime')) or 0.0,
+            "bursts": bursts,
+            "shape": shape,
+            "velocity": {},
+            "rot_z_speed": 0.0,
+            "size_over_lifetime": size_curve,
+            "color_over_lifetime": color_curve,
+            "render_mode": render_mode,
+            "texture": ("res://assets/particles/" + os.path.basename(tex_final)) if tex_final else "",
+        }
+        os.makedirs(OUT_JSON3D, exist_ok=True)
+        fp = os.path.join(OUT_JSON3D, go_name + '.json')
+    else:
+        out = {
+            "name": go_name,
+            "system_lifetime": ps.get('lengthInSec', 1.0),
+            "one_shot": not bool(ps.get('looping', False)),
+            "play_on_awake": bool(ps.get('playOnAwake', True)),
+            "amount": im.get('maxNumParticles', 100),
+            "lifetime": cv(im.get('startLifetime')) or 1.0,
+            "speed_min": cv(im.get('startSpeed')) or 0.0,
+            "speed_max": cv(im.get('startSpeed')) or 0.0,
+            "size_min": cv(im.get('startSize')) or 1.0,
+            "size_max": cv(im.get('startSize')) or 1.0,
+            "gravity": cv(im.get('gravityModifier')) or 0.0,
+            "color_min": [sc.get('minColor', {}).get(k, 1.0) for k in 'rgba'] if sc.get('minColor') else [1, 1, 1, 1],
+            "color_max": [sc.get('maxColor', {}).get(k, 1.0) for k in 'rgba'] if sc.get('maxColor') else [1, 1, 1, 1],
+            "emission_rate": cv(em.get('rateOverTime')) or 0.0,
+            "bursts": bursts,
+            "shape_type": ps.get('ShapeModule', {}).get('shapeType'),
+            "render_mode": render_mode,
+            "size_over_lifetime": size_curve,
+            "color_over_lifetime": color_curve,
+            "texture": ("res://assets/particles/" + os.path.basename(tex_final)) if tex_final else "",
+        }
+        os.makedirs(OUT_JSON, exist_ok=True)
+        fp = os.path.join(OUT_JSON, go_name + '.json')
     with open(fp, 'w', encoding='utf-8') as f:
         json.dump(out, f, ensure_ascii=False, indent=1)
-    print(f'✓ {go_name}: lifetime={out["lifetime"]} size={out["size_min"]} '
+    print(f'✓ {go_name}: lifetime={out["lifetime_max" if as3d else "lifetime"]} size={out["size_min"]} '
           f'bursts={bursts} tex={os.path.basename(tex_path) if tex_path else "无"} -> {fp}')
     return True
 
 
 def main():
     args = sys.argv[1:] or ['AttackHitSmall', 'Actual_Explosion']
+    as3d = False
+    if args and args[0] == '--3d':
+        as3d = True
+        args = args[1:]
     ok = 0
     for a in args:
         if a.endswith('.json'):
             go_name = os.path.basename(a).split('_')[0]
         else:
             go_name = a
-        if convert_effect(go_name):
+        if convert_effect(go_name, as3d):
             ok += 1
-    print(f'完成 {ok}/{len(args)}')
+    print(f'完成 {ok}/{len(args)}' + (' (3D)' if as3d else ''))
     return 0
 
 

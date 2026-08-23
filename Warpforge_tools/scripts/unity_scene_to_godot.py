@@ -32,7 +32,7 @@ Material/ParticleSystem/ParticleSystemRenderer/Camera/Light/RenderSettings JSON,
   (--roots 留空 = 按子树含量自动识别 3D 根: 各变体根名不统一, 名字过滤会漏 battlearena2/leviathan)
 多变体要点 (2026-08-22):
   - 资源同名异内容: 'Combined Mesh (root: scene)'/Flame03/Atlas 等跨变体常见 → 内容哈希去重, 不同则 <名>__<arena> 后缀
-  - 环境逐变体读 m_AmbientSky/Equator/GroundColor (平均×AMB_TRILIGHT_FACTOR), 光色=m_Color×LIGHT_WARM_FACTOR
+  - 环境逐变体按说明书直读: 环境光=RenderSettings m_AmbientProbe SH DC (不是 Trilight 平均!), 灯=m_Color×m_Intensity 直通
   - 相机 m_Enabled=0 (reflection camera) → enabled=false; 背景色取 3D 相机 m_BackGroundColor
 """
 import argparse
@@ -45,6 +45,7 @@ import sys
 
 sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from gltf_export import export_morph_gltf
 
 SCENE_ROOT = 'd:/2/解包整理/07_场景/'
 BUNDLE_DIR = 'd:/2/Warhammer 40k Warpforge/Warpforge_Data/StreamingAssets/aa/StandaloneWindows64/'
@@ -57,12 +58,8 @@ SHARED_PACKS = ['battlesharedresources_assets_all.bundle',
                 'battleprefabs_vfxandmisc_assets_all.bundle',
                 'atlasindividual_assets_battleatlasui.bundle',
                 'boosterpacks_assets_all.bundle']
-# Trilight 平均 → Godot 平坦环境色校准残差 (黑军团实测值: 平均(0.638,0.631,0.892)→发射(0.674,0.641,0.870))
-# 逐变体读取 m_AmbientSky/Equator/GroundColor 平均后乘此因子, 黑军团再生=原校准值不变
-AMB_TRILIGHT_FACTOR = (1.0559, 1.0160, 0.9759)
-# 太阳暖色校正: 黑军团验证 = 原版白日光 × (1, 0.957, 0.839) (Filmic 压缩 G/B 的 LUT 补偿)
-LIGHT_WARM_FACTOR = (1.0, 0.957, 0.839)
-
+# Trilight 三色/暖色校正因子已废弃 (2026-08-22 二十轮删除 — 19 轮 LUT 纠错后按说明书直通:
+# 环境光=SH probe DC 直读 / 灯=m_Color×m_Intensity 直通, 不再乘任何自创颜色因子)
 
 # ---------------------------------------------------------------- JSON 读取
 def load_pid_dir(d):
@@ -125,17 +122,17 @@ def q_rot_vec(q, v):
 
 def reflect_z_q(q):
     """Z 反射共轭: R' = M·R·M (M=diag(1,1,-1)) → 四元数 (x,y,z,w)→(-x,-y,z,w).
-    Unity(左手系, +Z 前) 数据放进 Godot(右手系, -Z 前) 的标准转换:
-    整世界内容进 scale=(1,1,-1) 根 (z 镜像, Godot 自动翻绕序),
-    相机移出镜像根: 位置 z 取反 + 四元数 Z 反射共轭 (无需 Y180).
-    只给相机转 Y180 而不做世界镜像 = 画面水平镜像 (左右互换, 本战场 bug 根因)."""
+    ⚠️ 备用理论, 未被验证 (2026-08-23 多探针: 正确转换=不做世界反射, 相机 Y180 直挂 —
+    "只转相机=镜像"为 16 轮错误论断; 见 reflect_x_q 注释)。"""
     return (-q[0], -q[1], q[2], q[3])
 
 
 def reflect_x_q(q):
     """X 反射共轭: M=diag(-1,1,1), R' = M·R·M → 四元数 (x,y,z,w)→(x,-y,-z,w).
-    Unity (左手系, +Z 前) 导出数据 → Godot (右手系, -Z 前) 必须整世界 X 反射,
-    OBJ 顶点+绕序同时反射, 否则画面水平镜像 (相机 Y180 只转正朝向, 无法修手性)."""
+    ⚠️ 已证伪 (2026-08-23): 16 轮曾断言"Unity 左手系→Godot 必须整世界 X 反射否则水平镜像",
+    多探针 (贴图 u→屏幕 x 映射) 实证相反 — MirrorX(内容 X 镜像+相机 conjX⊗Y180) = 屏幕镜像 ✗;
+    默认 no-mirror (内容直挂 Unity 世界坐标+相机仅 Y180) = 正像 ✓ (参考图太阳/王座/齿轮/横幅全对齐)。
+    此函数仅 MirrorX 试验分支 (--mirror) 使用, 勿再据此改动默认路径。"""
     return (q[0], -q[1], -q[2], q[3])
 
 
@@ -214,6 +211,14 @@ def grad_keys(v):
 def col_str(c):
     return 'Color(%.4f, %.4f, %.4f, %.4f)' % (
         c.get('r', 1.0), c.get('g', 1.0), c.get('b', 1.0), c.get('a', 1.0))
+
+
+def col_str_hdr(c):
+    """粒子材质 HDR 色 (原版 m_Color 可 >1 如 Embers 2.828) → Godot 下 glow 爆白,
+    引擎等效校准: >1 分量 clamp 到 1.0 (保留色相/alpha, 观感=原版微弱光斑)"""
+    return 'Color(%.4f, %.4f, %.4f, %.4f)' % (
+        min(1.0, c.get('r', 1.0)), min(1.0, c.get('g', 1.0)),
+        min(1.0, c.get('b', 1.0)), c.get('a', 1.0))
 
 
 def safe_name(nm):
@@ -639,7 +644,193 @@ class Assembler:
         return [tp for tp in self.root_transforms() if self.subtree_has_3d(tp)]
 
 
+# ---------------------------------------------------------------- UV 区域 alpha 修复
+UV_RECTS = {}   # tex_name -> [(u0,u1,v0,v1), ...] 网格 UV 引用区 (rect 仅记录)
+UV_OBJS = {}    # tex_name -> [OBJ 磁盘路径] (三角光栅 alpha 修复用)
+
+
+def uv_rect_of_obj(obj_path):
+    """读 OBJ vt 范围 (Godot 导入自动 1-v, 这里记录原始 OBJ v 用于区域判定)"""
+    us, vs = [], []
+    try:
+        for line in open(obj_path, encoding='utf-8', errors='ignore'):
+            if line.startswith('vt '):
+                p = line.split()
+                us.append(float(p[1])); vs.append(float(p[2]))
+    except OSError:
+        return None
+    return (min(us), max(us), min(vs), max(vs)) if us else None
+
+
+def triangle_uv_mask(obj_path, w, h):
+    """OBJ 面片 UV 三角 → 像素掩码 (numpy): 三角形内=真实渲染内容 (包围盒 rect 含 padding 是弧线根因)"""
+    import numpy as np
+    try:
+        from gltf_export import obj_parse
+        pos, uv, nrm, fi, tfi = obj_parse(obj_path)
+    except Exception:
+        return None
+    if not uv or len(fi) != len(tfi):
+        return None
+    maxv = max(fi) + 1 if fi else 0
+    if not maxv:
+        return None
+    mask = np.zeros((h, w), dtype=bool)
+    for k in range(0, len(fi), 3):
+        if k + 2 >= len(tfi):
+            break
+        p1 = uv[tfi[k]]
+        p2 = uv[tfi[k + 1]]
+        p3 = uv[tfi[k + 2]]
+        xs = [p1[0], p2[0], p3[0]]
+        ys = [p1[1], p2[1], p3[1]]
+        # OBJ vt v 自下而上 (Unity 导出); Godot OBJ 导入自动 1-v, 磁盘 PNG 的采样行=(1-v)*h
+        # → 光栅化用翻转后 v' (2026-08-23: 先前用 v·h 无翻转=修了错误侧, 子代理 uv 方向双重验证)
+        ys = [1.0 - y for y in ys]
+        p1s, p2s, p3s = (p1[0], ys[0]), (p2[0], ys[1]), (p3[0], ys[2])
+        if max(xs) < 0 or min(xs) >= 1 or max(ys) < 0 or min(ys) >= 1:
+            continue
+        x0 = max(0, int(min(xs) * w) - 1)
+        x1 = min(w, int(max(xs) * w) + 2)
+        y0 = max(0, int(min(ys) * h) - 1)
+        y1 = min(h, int(max(ys) * h) + 2)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        X, Y = np.meshgrid(np.arange(x0, x1), np.arange(y0, y1))
+        U = (X + 0.5) / w
+        V = (Y + 0.5) / h
+        def edge(ax, ay, bx, by):
+            return (bx - ax) * (V - ay) - (by - ay) * (U - ax)
+        e1 = edge(*p1s, *p2s)
+        e2 = edge(*p2s, *p3s)
+        e3 = edge(*p3s, *p1s)
+        inside = ((e1 >= 0) & (e2 >= 0) & (e3 >= 0)) | ((e1 <= 0) & (e2 <= 0) & (e3 <= 0))
+        mask[y0:y1, x0:x1] |= inside
+    return mask
+
+
+def repair_uv_alpha(args, tex_paths):
+    """预乘/无 alpha 图集修复 (三角光栅版, 2026-08-22 二十轮续2):
+    UnityPy 解码场景大图集 alpha 通道多为 0 但 RGB=内容 (黑军团主图集内容区 75% alpha0,
+    链/环/横幅/顶饰 → Godot ALPHA 材质下近透明=元素消失+透光弧线);
+    修复=网格 UV **三角形内**像素 alpha→255 (三角形内=真实内容; 包围盒含 padding, 全修会白块爆炸,
+    按亮度阈值修会"内容挖洞"=透光白弧 — 三角形掩码是精确区分)"""
+    from PIL import Image
+    import numpy as np
+    if not UV_RECTS:
+        return 0
+    n_total = 0
+    for tn, rects in UV_RECTS.items():
+        # 三档策略 (2026-08-23 用户目视"上部灰白矩形"→ 子代理原版贴图逐像素核查):
+        # Banners/Ground 原版 alpha 即设计值 (参考图证实横幅=镂空透光花纹, Ground 88.9% 基本完好,
+        # 船影带 39-46% 半透明=原样) — 曾按"解码丢 alpha"误修→白占位/天空透光区被实体化=灰白矩形;
+        # 不修 (保持原始 alpha)。仅 Atlas2 等"内容区 75%+ alpha=0"的真解码损坏图集按三角+保守判据修复。
+        if 'Banners' in tn or 'Ground' in tn:
+            print(f"[repair] skip (原版 alpha=设计值): {tn}")
+            continue
+        res = tex_paths.get(tn)
+        p = res_to_fs(args.out, res) if res else None
+        if not p or not os.path.exists(p):
+            continue
+        im = Image.open(p).convert('RGBA')
+        arr = np.array(im)
+        w, h = arr.shape[1], arr.shape[0]
+        mask = None
+        for (u0, u1, v0, v1) in rects:
+            pass  # rect 保留仅作 tex 引用记录; 三角掩码在下方重建
+        # 重新收集三角: UV_RECTS 存的是 obj 路径列表转 rect — 改为直接存 OBJ 路径
+        for obj_p in UV_OBJS.get(tn, []):
+            m = triangle_uv_mask(obj_p, w, h)
+            if m is not None:
+                mask = m if mask is None else (mask | m)
+        if mask is None:
+            continue
+        alpha = arr[:, :, 3]
+        mx = arr[:, :, :3].max(axis=2)
+        # 8×8 块均值/方差: "均匀亮块"=占位填充/天空透光区(低饱和近白 ~180,165,157), 保持透明;
+        # 非均匀亮块(金/橙/红内容)+暗色内容=真实图集内容, 实体化
+        g = arr[:, :, :3].mean(axis=2)
+        hh, ww = h - h % 8, w - w % 8
+        blk_mean = g[:hh, :ww].reshape(hh // 8, 8, ww // 8, 8).mean(axis=(1, 3))
+        blk_std = np.sqrt(((g[:hh, :ww] - blk_mean.repeat(8, 0).repeat(8, 1)) ** 2)
+                          .reshape(hh // 8, 8, ww // 8, 8).mean(axis=(1, 3)))
+        flat_avg = np.repeat(np.repeat(blk_mean, 8, 0), 8, 1)
+        flat_std = np.repeat(np.repeat(blk_std, 8, 0), 8, 1)
+        keep_flat = np.zeros((h, w), dtype=bool)
+        keep_flat[:hh, :ww] = (flat_avg > 140.0) & (flat_std < 8.0)
+        # 内容像素=三角内 alpha0 → 实体化 (25<max<=245); 均匀亮块保持透明
+        sel = mask & (alpha < 10) & (mx > 25) & (mx <= 245) & ~keep_flat
+        arr[sel, 3] = 255
+        Image.fromarray(arr).save(p)
+        n_total += int(sel.sum())
+    return n_total
+
+
+# ---------------------------------------------------------------- 形态键/动画 (20轮续)
+BS_FILES = {}   # mesh 名 -> blendshapes json 路径 (含形态键的网格)
+
+
+def export_blend_shapes(name, obj, out_dir):
+    """Unity Mesh m_Shapes → <mesh>.blendshapes.json:
+    {channels: [形态键名按通道序], shapes: [[[vert_idx, dx,dy,dz], ...] 每 shape 增量]}"""
+    try:
+        d = obj.read()
+        sh = getattr(d, 'm_Shapes', None)
+        if not sh or not len(getattr(sh, 'channels', []) or []):
+            return None
+        channels = [c.name for c in sh.channels]
+        shapes = []
+        for s in sh.shapes:
+            ds = []
+            v0, n = s.firstVertex, s.vertexCount
+            for i in range(v0, min(v0 + n, len(sh.vertices))):
+                v = sh.vertices[i]
+                pp = v.vertex
+                ds.append([int(v.index), round(float(pp.x), 6), round(float(pp.y), 6), round(float(pp.z), 6)])
+            shapes.append(ds)
+        fp = os.path.join(out_dir, 'assets', 'meshes', win_safe(name) + '.blendshapes.json')
+        json.dump({'channels': channels, 'shapes': shapes}, open(fp, 'w', encoding='utf-8'))
+        return fp
+    except Exception:
+        return None
+
+
+def clip_curves(arena_dir, clip):
+    """AnimationClip JSON → 动画曲线 (clip17: blendShape 权重)"""
+    fp = os.path.join(arena_dir, 'AnimationClip', 'AnimationClip_%s.json' % clip)
+    if not os.path.exists(fp):
+        return None
+    d = json.load(open(fp, encoding='utf-8'))
+    fcs = d.get('m_FloatCurves', []) or []
+    curves = []
+    for fc in fcs:
+        m = re.search(r'blendShape\.Key (\d+)-', str(fc.get('attribute', '')))
+        ks = ((fc.get('curve') or {}).get('m_Curve', [])) or []
+        if m and ks:
+            curves.append({'node': fc.get('path', ''), 'key': int(m.group(1)),
+                           'keys': [(float(k.get('time', 0)), float(k.get('value', 0))) for k in ks]})
+    return {'curves': curves}
+
+
+def clip16_curves(arena_dir):
+    """Camera Intro: m_EulerCurves + m_PositionCurves (局部坐标, 2.5s Once)"""
+    fp = os.path.join(arena_dir, 'AnimationClip', 'AnimationClip_16.json')
+    if not os.path.exists(fp):
+        return None
+    d = json.load(open(fp, encoding='utf-8'))
+
+    def pick(sec):
+        for item in d.get(sec, []) or []:
+            ks = ((item.get('curve') or {}).get('m_Curve', [])) or []
+            if ks:
+                return [{'t': float(k.get('time', 0)), 'v': k.get('value')} for k in ks]
+        return None
+    return {'pos': pick('m_PositionCurves'), 'rot': pick('m_EulerCurves')}
+
+
 # ---------------------------------------------------------------- GDScript 写器
+
+
 class GdWriter:
     def __init__(self, f):
         self.f = f
@@ -713,6 +904,9 @@ def mat_gd(w, var, mi, tex_paths):
         w.line('%s.emission_enabled = true' % var)
         w.line('%s.emission_energy_multiplier = %.3f' % (var, mi.emission_energy()))
     w.line('%s.roughness = 0.9' % var)
+    # 引擎差异校准: URP 材质在 Godot 的 specular 高光在原版渲染无体现 (暗场景锐边白弧),
+    # 关闭镜面 — 原版视觉=图集固有色为主 (2026-08-22 二十轮)
+    w.line('%s.specular_mode = BaseMaterial3D.SPECULAR_DISABLED' % var)
     return var
 
 
@@ -807,6 +1001,464 @@ def make_white_tex(fp, wp):
     img.save(wp)
 
 
+def world_chain_of(a, tpid):
+    """沿 m_Father 链连乘局部 pos/quat (链上 scale 均为 1) → Unity 世界变换"""
+    chain = []
+    cur = tpid
+    while cur is not None and cur in a.TF:
+        chain.append(a.local_trans(cur))
+        cur = a.TF[cur].get('m_Father', {}).get('m_PathID')
+    p = (0.0, 0.0, 0.0)
+    q = (0.0, 0.0, 0.0, 1.0)
+    for lt in reversed(chain):
+        lp, lq = lt[0:3], lt[3]
+        rp = q_rot_vec(q, lp)
+        p = (p[0] + rp[0], p[1] + rp[1], p[2] + rp[2])
+        q = q_mul(q, lq)
+    return p, q
+
+
+def conj_z_trs(lt):
+    """Z 反射共轭 TRS: T' = M_z·T·M_z (位置 z 取反 + 四元数 reflect_z_q + scale 不变) —
+    与顶点数据 z 镜像配合 = 免运行时负 scale 的整场 Z 反射 (方案A glTF 静态折入)"""
+    return (lt[0], lt[1], -lt[2]), reflect_z_q(lt[3]), lt[4]
+
+
+def resolve_lut_res(args, a):
+    """ColorLookup LUT 贴图 (场景引用 → 导出 PNG → res 路径; 无则回退共享 LUT Normal)"""
+    lref = a.lut_ref_val
+    if lref:
+        try:
+            lobj = a.b.read_obj(lref, 'Texture2D')
+            if lobj is not None:
+                limg = getattr(lobj.read(), 'image', None)
+                if limg is not None:
+                    ln = a.b.obj_name(lobj) or 'lut_%s' % lref.get('m_PathID')
+                    lp = os.path.join(args.out, 'assets', 'textures', win_safe(ln) + '.png')
+                    if not os.path.exists(lp):
+                        os.makedirs(os.path.dirname(lp), exist_ok=True)
+                        limg.save(lp + '.tmp', format='PNG')
+                        lp = dedupe_file(lp, lp + '.tmp', args.arena)
+                    return 'res://assets/textures/' + os.path.basename(lp)
+        except Exception:
+            pass
+    if os.path.exists(os.path.join(args.out, 'assets', 'textures', 'LUT Normal.png')):
+        return 'res://assets/textures/LUT Normal.png'
+    return None
+
+
+# ---------------------------------------------------------------- 方案A: 场景级 glTF 导出 (2026-08-23)
+def rot_from_to(a, b):
+    """最短弧旋转 (a→b, 单位向量) → 四元数; 用于反射后视线/灯方向定轴
+    (反射下 'B·(0,0,-1)=方向' 约定翻转, 共轭四元数得 -M·d → 必须按向量直接构造)"""
+    ax, ay, az = a
+    bx, by, bz = b
+    dot = ax * bx + ay * by + az * bz
+    if dot > 0.999999:
+        return (0.0, 0.0, 0.0, 1.0)
+    if dot < -0.999999:
+        return (1.0, 0.0, 0.0, 0.0) if abs(az) < 0.99 else (0.0, 1.0, 0.0, 0.0)
+    cx, cy, cz = ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx
+    s = math.sqrt(0.5 * (1.0 + dot))
+    inv = 1.0 / (2.0 * s)
+    return (cx * inv, cy * inv, cz * inv, s)
+
+
+def emit_gltf(args, a, all_nodes, mesh_paths, tex_paths, white_paths):
+    """fmt=gltf: Mesh+材质链+贴图+相机/灯+手性转换 (Z 反射折入顶点/变换, 无负 scale) 一次导出
+    → Godot 原生导入 → 贴图/骨架/动画(glTF)/粒子(代码) 各取所长。
+    与 fmt=gd (MirrorZ 根) 渲染等价: 顶点 v→(x,y,-z)+绕序翻转, 每节点 TRS 共轭 (见 conj_z_trs)"""
+    from gltf_export import GltfDoc, merge_obj_gltf, _f32
+    gd = GltfDoc()
+    out = args.out
+    gd.doc['root_nodes'] = [gd.add_node(name='ArenaContent')]
+    gd.doc.setdefault('extensionsUsed', [])
+
+    def use_ext(e):
+        if e not in gd.doc['extensionsUsed']:
+            gd.doc['extensionsUsed'].append(e)
+
+    img_uri, tex_uri = {}, {}
+    mat_cache = {}
+    node_idx = {}
+    emitted = []          # (gopid, node_i, parent_key) parent_key: tpid 或 'ROOT'
+    cam_info = {'pitch': {}, 'bg': None, 'name': None}
+    light_info = []       # (nm, energy, shadow)
+    morph_nodes = []      # (node_i, nm, curves)
+    patches = {}          # nm -> pact
+    patch_mi = {}         # nm -> MatInfo (uvscroll 修正重建)
+    curves17 = clip_curves(os.path.join(SCENE_ROOT, args.arena), '17')
+
+    def gltf_material(mi, smr=False):
+        key = id(mi)
+        if key in mat_cache:
+            return mat_cache[key]
+        base = {'pbrMetallicRoughness': {'metallicFactor': 0.0, 'roughnessFactor': 0.9}}
+        if mi.tex_name and mi.tex_name in tex_paths:
+            uri = '../textures/' + os.path.basename(tex_paths[mi.tex_name])
+            if uri not in img_uri:
+                gd.doc.setdefault('images', []).append({'uri': uri})
+                img_uri[uri] = len(gd.doc['images']) - 1
+                gd.doc.setdefault('textures', []).append({'source': img_uri[uri]})
+                tex_uri[uri] = len(gd.doc['textures']) - 1
+            base['pbrMetallicRoughness']['baseColorTexture'] = {'index': tex_uri[uri]}
+            if mi.base_color:
+                c = mi.base_color
+                base['pbrMetallicRoughness']['baseColorFactor'] = [
+                    float(c.get('r', 1.0)), float(c.get('g', 1.0)), float(c.get('b', 1.0)),
+                    float(c.get('a', 1.0))]
+        if mi.emission_color:
+            c = mi.emission_color
+            base['emissiveFactor'] = [max(0.0, min(1.0, float(c.get('r', 0.0)))),
+                                      max(0.0, min(1.0, float(c.get('g', 0.0)))),
+                                      max(0.0, min(1.0, float(c.get('b', 0.0))))]
+            e = mi.emission_energy()
+            if e > 1.0:
+                base.setdefault('extensions', {})['KHR_materials_emissive_strength'] = {
+                    'emissiveStrength': e}
+                use_ext('KHR_materials_emissive_strength')
+        if mi.is_transparent():
+            base['alphaMode'] = 'BLEND'
+        if mi.cull == 0 or smr:
+            base['doubleSided'] = True
+        pact = {'add': mi.blend >= 2,
+                'depth_off': mi.is_transparent() and mi.zwrite <= 0,
+                'cull_front': mi.cull == 1,
+                'uvscroll': bool(mi.tex_name2 and mi.tex_name2 in tex_paths)}
+        m_i = gd.add_material(mi.name or 'mat%d' % len(mat_cache), mat=base)
+        mat_cache[key] = (m_i, pact)
+        return m_i, pact
+
+    def gltf_parent(tpid):
+        cur = tpid
+        while cur is not None and cur in a.TF:
+            par = a.TF[cur].get('m_Father', {}).get('m_PathID')
+            if par in node_idx:
+                return node_idx[par]
+            cur = par
+        return gd.doc['root_nodes'][0]
+
+    for kind, tpid, gopid, nm, payload, parent_tpid in all_nodes:
+        if kind == 'skip-mesh':
+            continue
+        if kind == 'container':
+            n_i = gd.add_node(name=nm, trs=conj_z_trs(a.local_trans(tpid)))
+            node_idx[gopid] = n_i
+            emitted.append((gopid, n_i, parent_tpid))
+            continue
+        if kind == 'mesh':
+            mats = a.mats_of(gopid)
+            mi = mats[0] if mats else None
+            if mi is None or not ((mi.tex_name and mi.tex_name in tex_paths) or
+                                  (mi.tex_name2 and mi.tex_name2 in tex_paths)):
+                continue  # 无可见材质网格 = 碰撞/逻辑 (同 gd 路径)
+            smr = a.has_smr(gopid)
+            m_i, pact = gltf_material(mi, smr)
+            obj_path = mesh_paths[payload].replace('res://', out + '/')
+            geo = merge_obj_gltf(obj_path, mirror_z=True)
+            morph_deltas = None
+            weights = None
+            if payload in BS_FILES:
+                bsdata = json.load(open(BS_FILES[payload], encoding='utf-8'))
+                morph_deltas = [[(int(e[0]), e[1], e[2], -e[3]) for e in s] for s in bsdata['shapes']]
+                weights = [0.0] * len(morph_deltas)
+            prim, targets = gd.add_mesh_primitive(geo, m_i, name=win_safe(payload),
+                                                  morph_deltas=morph_deltas)
+            mesh_i = gd.add_mesh([prim], name=win_safe(payload), weights=weights if targets else None)
+            n_i = gd.add_node(name=nm, mesh=mesh_i, trs=conj_z_trs(a.local_trans(tpid)))
+            node_idx[gopid] = n_i
+            emitted.append((gopid, n_i, parent_tpid))
+            if targets:
+                morph_nodes.append((n_i, nm, [c for c in (curves17 or {}).get('curves', [])
+                                              if c.get('node') == nm]))
+            if any(pact.values()):
+                patches[nm] = pact
+                patch_mi[nm] = mi
+            continue
+        if kind == 'camera':
+            cd = next(a.CAM[c] for c in a.go_comps[gopid] if c in a.CAM)
+            if not cd.get('m_Enabled', 1):
+                print('  [跳过禁用相机] %s' % nm)
+                continue
+            wp, wq = world_chain_of(a, tpid)
+            # 视线: Unity 看 +Z (q·ẑ) → Z 反射后 = M_z·d; Godot 相机看 -Z_local →
+            # 直接取 短弧旋转 (0,0,-1)→M_z·d (反射下共轭四元数会得 -M·d 符号反转, 勿用)
+            du = q_rot_vec(wq, (0.0, 0.0, 1.0))
+            qq = rot_from_to((0.0, 0.0, -1.0), (du[0], du[1], -du[2]))
+            fov_v = float(cd.get('field of view') or 46.397)
+            lsy = float(cd.get('m_LensShift', {}).get('y') or 0.0)
+            if lsy and not args.no_lensshift:
+                theta = math.atan(lsy * math.tan(math.radians(fov_v) / 2.0))
+                qq = q_mul(qq, (math.sin(theta / 2.0), 0.0, 0.0, math.cos(theta / 2.0)))
+                cam_info['pitch'][nm] = math.degrees(theta)
+                print('  [camera] LensShift y=%.3f → pitch %+.2f°' % (lsy, cam_info['pitch'][nm]))
+            cam_info['name'] = nm
+            gd.doc.setdefault('cameras', []).append({
+                'type': 'perspective',
+                'perspective': {'yfov': math.radians(fov_v),
+                                'znear': float(cd.get('near clip plane', 0.3)),
+                                'zfar': float(cd.get('far clip plane', 300.0))}})
+            n_i = gd.add_node(name=nm, cam=len(gd.doc['cameras']) - 1,
+                              trs=((wp[0], wp[1], -wp[2]), qq, (1.0, 1.0, 1.0)))
+            node_idx[gopid] = n_i
+            emitted.append((gopid, n_i, 'ROOT'))
+            if cam_info['bg'] is None and 'UI' not in nm:
+                bc = cd.get('m_BackGroundColor') or {}
+                cam_info['bg'] = (float(bc.get('r', 0.0288)), float(bc.get('g', 0.0288)),
+                                  float(bc.get('b', 0.0294)))
+            continue
+        if kind == 'light':
+            ld = next(a.LIG[c] for c in a.go_comps[gopid] if c in a.LIG)
+            lt = a.local_trans(tpid)
+            wp, wq = world_chain_of(a, tpid)
+            # 旧 gd 实现: 局部 q⊗RotX(-90) 挂链下, 方向=链q·q·RX(-90)·(0,0,-1);
+            # 反射后方向 = M_z·d → 短弧旋转构造 (同相机, 共轭符号反转勿用)
+            d_old = q_rot_vec(q_mul(wq, q_mul(lt[3], (-0.70710678, 0.0, 0.0, 0.70710678))),
+                              (0.0, 0.0, -1.0))
+            rot_l = rot_from_to((0.0, 0.0, -1.0), (d_old[0], d_old[1], -d_old[2]))
+            lc = ld.get('m_Color', {}) or {}
+            use_ext('KHR_lights_punctual')
+            gd.doc.setdefault('extensions', {}).setdefault(
+                'KHR_lights_punctual', {'lights': []})
+            gd.doc['extensions']['KHR_lights_punctual']['lights'].append({
+                'type': 'directional', 'intensity': 1.0,
+                'color': [float(lc.get('r', 1.0) or 1.0), float(lc.get('g', 1.0) or 1.0),
+                          float(lc.get('b', 1.0) or 1.0)]})
+            li = len(gd.doc['extensions']['KHR_lights_punctual']['lights']) - 1
+            n_i = gd.add_node(name=nm, light=li,
+                              trs=((wp[0], wp[1], -wp[2]), rot_l, (1.0, 1.0, 1.0)))
+            node_idx[gopid] = n_i
+            emitted.append((gopid, n_i, 'ROOT'))
+            sh = ld.get('m_Shadows', {})
+            light_info.append((nm, float(ld.get('m_Intensity', 1.0) or 1.0) * args.light_energy,
+                               sh.get('m_Type', 0) != 0 and ld.get('m_Type') == 1))
+            continue
+    # 父子挂接 (nearest emitted ancestor; 'ROOT' → 场景根)
+    for gopid, n_i, parent_key in emitted:
+        parent_i = gd.doc['root_nodes'][0] if parent_key == 'ROOT' else gltf_parent(parent_key)
+        gd.doc['nodes'][parent_i].setdefault('children', []).append(n_i)
+    # clip17 形态键权重动画 (单动画, 每 morph 节点一条 weights 通道)
+    if morph_nodes:
+        n_samples = 61
+        length = 15.98
+        times = [length * i / (n_samples - 1) for i in range(n_samples)]
+
+        def ev(keys, t):
+            if not keys:
+                return 0.0
+            if t <= keys[0][0]:
+                return keys[0][1]
+            if t >= keys[-1][0]:
+                return keys[-1][1]
+            for i in range(len(keys) - 1):
+                t0, v0 = keys[i]
+                t1, v1 = keys[i + 1]
+                if t0 <= t <= t1:
+                    f = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+                    return v0 + (v1 - v0) * f
+            return keys[-1][1]
+
+        t_acc = gd.add_accessor(gd.add_view(_f32(times), 34962), 5126, n_samples, 'SCALAR',
+                                'anim_time', ([0.0], [length]))
+        channels, samplers = [], []
+        for si, (n_i, nm2, curves) in enumerate(morph_nodes):
+            n_shape = len(gd.doc['meshes'][gd.doc['nodes'][n_i]['mesh']].get('weights', []))
+            if not n_shape:
+                continue
+            weights = []
+            for t in times:
+                wv = [0.0] * n_shape
+                for c in curves:
+                    k = int(c.get('key', 1)) - 1
+                    if 0 <= k < n_shape:
+                        wv[k] = ev(c['keys'], t) / 100.0
+                weights.append(wv)
+            w_acc = gd.add_accessor(gd.add_view(_f32([x for w in weights for x in w]), 34962),
+                                    5126, len(weights) * n_shape, 'SCALAR', nm2 + '_weights')
+            samplers.append({'input': t_acc, 'interpolation': 'LINEAR', 'output': w_acc})
+            channels.append({'sampler': si, 'target': {'node': n_i, 'path': 'weights'}})
+        gd.add_animation('SceneAnim', channels, samplers)
+    # 写盘
+    gltf_p = os.path.join(out, 'assets', 'meshes', 'unity_arena_%s.gltf' % args.arena)
+    bin_p = os.path.join(out, 'assets', 'meshes', 'unity_arena_%s.bin' % args.arena)
+    gd.write(gltf_p, bin_p)
+    print('✓ 场景 glTF: %s (%d 节点 / %d 网格 / %d 材质)' % (
+        gltf_p, len(gd.doc['nodes']), len(gd.doc.get('meshes', [])),
+        len(gd.doc.get('materials', []))))
+
+    # ---- 薄 .gd: 实例化 glTF + 引擎校准 + 命名材质修正 + 灯/相机 + 粒子 + 环境/LUT + intro ----
+    out_gd = os.path.join(out, 'scenes', 'unity_arena_%s.gd' % args.arena)
+    with open(out_gd, 'w', encoding='utf-8') as f:
+        w = GdWriter(f)
+        w.line('# 由 unity_scene_to_godot.py 自动生成 (fmt=gltf) — 勿手改, 重跑脚本即可')
+        w.line('# 来源: 解包整理/07_场景/%s (原版 Unity 序列化 JSON 说明书)' % args.arena)
+        w.line('# 静态场景=scene.gltf (手性已在导出阶段折入, 无负 scale); 粒子/环境/LUT/intro 代码侧')
+        w.line('extends Node3D')
+        w.line('')
+        w.line('func _ready() -> void:')
+        w.line('\t_build()')
+        w.line('')
+        w.line('func _build() -> void:')
+        w.line('\tvar scene: Node3D = load(%r).instantiate()' % ('res://assets/meshes/' +
+              os.path.basename(gltf_p)))
+        # clip17 autoplay 必须在 add_child 之前设置 (AnimationPlayer 入树时读取 autoplay)
+        w.line('\tvar _ap: AnimationPlayer = scene.find_child("AnimationPlayer", true, false)')
+        w.line('\tif _ap: _ap.autoplay = "SceneAnim"')
+        w.line('\tscene.name = "Content"')
+        w.line('\tadd_child(scene)')
+        w.line('')
+        w.line('\t# 引擎等效校准: 原版 URP 无镜面高光 (暗场景锐边白弧) → 全部 SPECULAR_DISABLED')
+        w.line('\tfor _mi in scene.find_children("*", "MeshInstance3D", true, false):')
+        w.line('\t\tvar _mbase: StandardMaterial3D = null')
+        w.line('\t\tif _mi.mesh != null:')
+        w.line('\t\t\t_mbase = _mi.mesh.surface_get_material(0)')
+        w.line('\t\tif _mbase is StandardMaterial3D:')
+        w.line('\t\t\tvar _md := _mbase.duplicate() as StandardMaterial3D')
+        w.line('\t\t\t_md.specular_mode = BaseMaterial3D.SPECULAR_DISABLED')
+        w.line('\t\t\t_mi.set_surface_override_material(0, _md)')
+        # 命名材质修正 (glTF 表达不了的混合/滚动/裁剪)
+        for pi, (nm, pact) in enumerate(sorted(patches.items())):
+            pvn = '_pn%d' % pi
+            w.line('')
+            w.line('\t# 材质修正: %s (%s)' % (nm, ','.join(k for k, v in pact.items() if v)))
+            w.line('\tvar %s := scene.find_child(%r, true, false) as MeshInstance3D' % (pvn, nm))
+            w.line('\tif %s and %s.mesh != null:' % (pvn, pvn))
+            w.line('\t\tvar _pm: StandardMaterial3D = %s.get_surface_override_material(0)' % pvn)
+            w.line('\t\tif _pm == null: _pm = %s.mesh.surface_get_material(0)' % pvn)
+            w.line('\t\tif _pm is StandardMaterial3D:')
+            if pact['uvscroll']:
+                # 双贴图 (Runes "Unlit UV scroll"): shader 双层 + TIME 滚动
+                mi2 = patch_mi[nm]
+                w.line('\t\t\tvar _sus := ShaderMaterial.new()')
+                w.line('\t\t\t_sus.shader = load("res://assets/uv_scroll.gdshader")')
+                w.line('\t\t\t_sus.set_shader_parameter("main_tex", load(%r))' % tex_paths[mi2.tex_name])
+                w.line('\t\t\t_sus.set_shader_parameter("secondary_tex", load(%r))' % tex_paths[mi2.tex_name2])
+                v4 = mi2.vector4_1 or {}
+                w.line('\t\t\t_sus.set_shader_parameter("uv_scroll", Vector4(%.3f, %.3f, %.3f, %.3f))' % (
+                    float(v4.get('r', 1.0) or 1.0), float(v4.get('g', 1.0) or 1.0),
+                    float(v4.get('b', 0.0) or 0.0), float(v4.get('a', 0.0) or 0.0)))
+                w.line('\t\t\t_sus.set_shader_parameter("layers_blend_opacity", 1.00)')
+                w.line('\t\t\t%s.set_surface_override_material(0, _sus)' % pvn)
+            else:
+                w.line('\t\t\tvar _pd := _pm.duplicate() as StandardMaterial3D')
+                if pact['add']:
+                    w.line('\t\t\t\t_pd.blend_mode = BaseMaterial3D.BLEND_MODE_ADD')
+                if pact['depth_off']:
+                    w.line('\t\t\t\t_pd.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED')
+                if pact['cull_front']:
+                    w.line('\t\t\t\t_pd.cull_mode = BaseMaterial3D.CULL_FRONT')
+                w.line('\t\t\t%s.set_surface_override_material(0, _pd)' % pvn)
+        # 灯能量校准 (glTF intensity 语义 ≠ Unity cc/m²; 直通=过曝, 发光因子等效校准)
+        for li2, (nm, energy, shadow) in enumerate(light_info):
+            lvn = '_pl%d' % li2
+            w.line('')
+            w.line('\tvar %s := scene.find_child(%r, true, false) as DirectionalLight3D' % (lvn, nm))
+            w.line('\tif %s:' % lvn)
+            w.line('\t\t%s.light_energy = %.3f' % (lvn, energy))
+            if shadow:
+                w.line('\t\t%s.shadow_enabled = true' % lvn)
+        # 相机: 唯一 3D 相机 → current
+        cam_name = cam_info['name'] or 'BoardCamera'
+        w.line('')
+        w.line('\tvar _cam := scene.find_child(%r, true, false) as Camera3D' % cam_name)
+        w.line('\tif _cam: _cam.make_current()')
+        w.line('')
+        # 粒子 (MirrorZ 包装: 与 glTF 内容同手性; 世界坐标直挂 — 父 scale.z=-1 自动镜像方向)
+        w.line('\tvar mirror := Node3D.new()')
+        w.line("\tmirror.name = 'MirrorZ'")
+        w.line('\tmirror.position = Vector3(0.0, 0.0, 0.0)')
+        w.line('\tmirror.scale = Vector3(1.0, 1.0, -1.0)')
+        w.line('\tself.add_child(mirror)')
+        w.line('')
+        for kind, tpid, gopid, nm, payload, parent_tpid in all_nodes:
+            if kind == 'particle':
+                emit_particle_gd(w, a, ('pn_%d' % gopid), tpid, nm, payload, tex_paths,
+                                 parent_expr='mirror', white_paths=white_paths, world_rel=True)
+        # 环境 + LUT (同 gd 路径)
+        for r in a.REN.values():
+            w.line('\tvar env := WorldEnvironment.new()')
+            w.line('\tvar e := Environment.new()')
+            probe = r.get('m_AmbientProbe') or {}
+
+            def _sh(i):
+                v = probe.get('sh[ %d]' % i) or probe.get('sh[%d]' % i)
+                return float(v) if v is not None else 1.0
+            sh_c = (_sh(0), _sh(1), _sh(2))
+            w.line('\te.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR')
+            w.line('\te.ambient_light_color = Color(%.4f, %.4f, %.4f, 1.0000)' %
+                   tuple(max(0.0, c) for c in sh_c))
+            w.line('\te.ambient_light_energy = %.3f' % args.ambient_energy)
+            if r.get('m_Fog'):
+                w.line('\te.fog_enabled = true')
+                w.line('\te.fog_light_color = ' + col_str(r.get('m_FogColor', {})))
+                w.line('\te.fog_density = %.5f' % float(r.get('m_FogDensity', 0.01)))
+            w.line('\te.tonemap_mode = Environment.TONE_MAPPER_LINEAR')
+            w.line('\te.glow_enabled = true')
+            w.line('\te.glow_intensity = 5.0')
+            w.line('\te.glow_hdr_threshold = 1.15')
+            w.line('\te.set("glow_levels/6", 1.0)')
+            w.line('\te.set("glow_levels/7", 1.0)')
+            for i in range(1, 6):
+                w.line('\te.set("glow_levels/%d", 0.0)' % i)
+            w.line('\te.background_mode = Environment.BG_COLOR')
+            bg = cam_info['bg'] or (0.0288, 0.0288, 0.0294)
+            w.line('\te.background_color = Color(%.4f, %.4f, %.4f, 1)' % bg)
+            w.line('\tenv.environment = e')
+            w.line('\tenv.name = "Env"')
+            w.line('\tadd_child(env)')
+            w.line('\tvar pp := CanvasLayer.new()')
+            w.line('\tpp.layer = -1')
+            w.line('\tvar cr := ColorRect.new()')
+            w.line('\tcr.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)')
+            w.line('\tcr.mouse_filter = Control.MOUSE_FILTER_IGNORE')
+            w.line('\tvar pm := ShaderMaterial.new()')
+            w.line('\tpm.shader = load("res://assets/lut_vignette.gdshader")')
+            lut_res = resolve_lut_res(args, a)
+            if lut_res:
+                w.line('\tpm.set_shader_parameter("lut", load(%r))' % lut_res)
+                w.line('\tpm.set_shader_parameter("lut_contribution", 1.0)')
+            w.line('\tpm.set_shader_parameter("vignette_intensity", 0.297)')
+            w.line('\tpm.set_shader_parameter("vignette_smoothness", 0.2)')
+            w.line('\tcr.material = pm')
+            w.line('\tpp.add_child(cr)')
+            w.line('\tadd_child(pp)')
+            break
+        # ---- Camera Intro (clip16) ----
+        c16 = clip16_curves(os.path.join(SCENE_ROOT, args.arena))
+        if c16 and c16.get('pos'):
+            w.line('')
+            pos = c16['pos']
+            p0, p1 = pos[0]['v'], pos[-1]['v']
+            p0x, p0y, p0z = 100.0 + p0['x'], p0['y'], -p0['z']
+            p1x, p1y, p1z = 100.0 + p1['x'], p1['y'], -p1['z']
+            rot = c16.get('rot') or []
+            r0x = rot[0]['v']['x'] if rot else 0.0
+            r1x = -cam_info['pitch'].get(cam_name, 0.0) if cam_info['pitch'] else (
+                rot[-1]['v']['x'] if rot else 0.0)
+            w.line('\t_tgt_cam = _cam')
+            w.line('')
+            w.line('var _tgt_cam: Camera3D')
+            w.line('var _anim_t := 0.0')
+            w.line('')
+            w.line('func _process(delta: float) -> void:')
+            w.line('\t_anim_t += delta')
+            w.line('\tif _tgt_cam:')
+            w.line('\t\tvar _it := clampf(_anim_t / 2.5, 0.0, 1.0)')
+            w.line('\t\t_tgt_cam.position = Vector3(%.4f, %.4f, %.4f).lerp(Vector3(%.4f, %.4f, %.4f), _it)' % (
+                p0x, p0y, p0z, p1x, p1y, p1z))
+            w.line('\t\t_tgt_cam.rotation_degrees.x = lerpf(%.4f, %.4f, _it)' % (r0x, r1x))
+            w.line('\t\tif _it >= 1.0:')
+            w.line('\t\t\t_tgt_cam = null  # intro 结束: 停止每帧写相机')
+    # 包装 tscn (挂脚本)
+    out_tscn = os.path.join(out, 'scenes', 'unity_arena_%s.tscn' % args.arena)
+    with open(out_tscn, 'w', encoding='utf-8') as f:
+        f.write('[gd_scene load_steps=2 format=3]\n\n')
+        f.write('[ext_resource type="Script" path="res://scenes/unity_arena_%s.gd" id="1"]\n\n' % args.arena)
+        f.write('[node name="Arena" type="Node3D"]\n')
+        f.write('script = ExtResource("1")\n')
+    print('✓ 输出:', out_gd)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--arena', default='battlearenablacklegion')
@@ -823,14 +1475,25 @@ def main() -> int:
                                        'Shadow Receiver,CardLowBoardLimit,TMP SubMesh,CardBack,'
                                        'Card Info,Textbackgrounds,ChooseCardMenuAnchor,'
                                        'MulliganAnchor,CemeteryGroup,EffectList,EffectAnchor,'
-                                       'Energy Accumulation,HandArea,PlayerArea,EnemyAssetArea,'
+                                       'HandArea,PlayerArea,EnemyAssetArea,'
                                        'MinionOrWarlord,Tactic Container,Bg,arrow1,TutorialArrows'),
-                    help='跳过名字包含这些子串的整棵子树 (逗号分隔)')
+                    help='跳过名字包含这些子串的整棵子树 (逗号分隔); '
+                         '注意: Energy Accumulation 不再跳过 (2026-08-22 二十轮: 原版粒子树 active=True,'
+                         ' 原排除=违背完全复刻; 仅 2D UI 根由 HandArea/PlayerArea 等排除)')
     ap.add_argument('--all-roots', action='store_true', help='不过滤根')
-    ap.add_argument('--light-energy', type=float, default=1.0,
-                    help='方向光能量校准系数 (Unity intensity 1.0 直通在 Godot 过曝; 黑军团等效 ~0.2-0.25)')
-    ap.add_argument('--ambient-energy', type=float, default=1.0,
-                    help='环境光能量校准系数 (Trilight intensity 0.41 直通偏亮时的等效系数)')
+    ap.add_argument('--light-energy', type=float, default=1.1,
+                    help='方向光能量校准系数 (引擎差异: Unity SH 全阶+URP 直通 vs Godot 平场; 黑军团 1.1=参考亮度匹配 2026-08-23)')
+    ap.add_argument('--ambient-energy', type=float, default=1.15,
+                    help='环境光能量校准 (Unity 直通过曝, 引擎物理等效)')
+    ap.add_argument('--no-lensshift', action='store_true',
+                    help='跳过 LensShift→pitch 补偿 (pitch 方向实验未定, 回退用)')
+    ap.add_argument('--no-mirror', action='store_true',
+                    help='试验: 内容直挂 Unity 世界系+相机仅 Y180 (2026-08-23 弧线朝外=错, 仅试验)')
+    ap.add_argument('--mirror', action='store_true',
+                    help='试验: MirrorX X 镜像 (2026-08-23 弧线朝外=错, 仅试验; 默认=Z 反射=定案)')
+    ap.add_argument('--fmt', default='gd', choices=['gd', 'gltf'],
+                    help="gd=GDScript 场景脚本 (默认); gltf=场景级 glTF 原生导入 (方案A: "
+                         "Mesh+材质+贴图+相机/灯+手性一次性导出, 无负 scale)")
     args = ap.parse_args()
     skips = [s.strip() for s in args.skip.split(',') if s.strip()]
 
@@ -901,6 +1564,11 @@ def main() -> int:
                 os.remove(imp)
         res = 'res://assets/meshes/' + os.path.basename(p)
         mesh_paths[name] = res
+        # 形态键网格 → blendshapes.json (clip17 链甩鞭动画数据源)
+        if obj is not None and name not in BS_FILES:
+            bsf = export_blend_shapes(name, obj, args.out)
+            if bsf:
+                BS_FILES[name] = bsf
         return res
 
     def ensure_tex(mi, which=1):
@@ -946,6 +1614,11 @@ def main() -> int:
         # m_IsActive=0: 原版禁用 (如黑军团 CrosshairLine 3D/Cache Stealth) → 整树跳过
         if g.get('m_IsActive', 1) not in (1, True, None):
             return
+        # layer 5=UI 世界 (UI Camera cullingMask=32 专属层): 能量积累/Glow 等是 UI 世界粒子
+        # (黑军团实测: Energy/Glow/Accumulated 全在 layer5, 世界 x∈[0,80] 战场区外),
+        # 不属于 BoardCamera 3D 战场层 → 跳 (2026-08-22 二十轮, 机制=layer 而非名字排除)
+        if int(g.get('m_Layer', 0) or 0) == 5:
+            return
         for sk in skips:
             if sk in nm:
                 return
@@ -966,6 +1639,12 @@ def main() -> int:
                 mesh_res = ensure_mesh(mesh_name, mesh_obj)
                 if mesh_res is None:
                     return  # 导出失败 → 跳过该网格节点及子树
+                # 记录该网格 UV 三角阴影 OBJ 路径 → 贴图 alpha 修复 (三角光栅=内容精确)
+                _op = mesh_res.replace('res://', args.out + '/')
+                for mi in mats:
+                    if mi.tex_name:
+                        UV_RECTS.setdefault(mi.tex_name, []).append(uv_rect_of_obj(_op))
+                        UV_OBJS.setdefault(mi.tex_name, []).append(_op)
                 payload = mesh_name
         elif a.has_ps(gopid):
             ps, render_mode, mref, mats = a.ps_of(gopid)
@@ -1010,6 +1689,13 @@ def main() -> int:
         counts[k] = counts.get(k, 0) + 1
     print('节点统计:', counts, '| 网格 %d 贴图 %d' % (len(mesh_paths), len(tex_paths)))
 
+    if args.fmt == 'gltf':
+        emit_gltf(args, a, all_nodes, mesh_paths, tex_paths, white_paths)
+        nfix = repair_uv_alpha(args, tex_paths)
+        if nfix:
+            print('✓ alpha 修复: %d 像素 (网格 UV 区内暗内容实体化)' % nfix)
+        return 0
+
     # ---- 生成 .gd ----
     out_gd = os.path.join(args.out, 'scenes', 'unity_arena_%s.gd' % args.arena)
     os.makedirs(os.path.dirname(out_gd), exist_ok=True)
@@ -1017,6 +1703,9 @@ def main() -> int:
         w = GdWriter(f)
         w.line('# 由 unity_scene_to_godot.py 自动生成 — 勿手改, 重跑脚本即可')
         w.line('# 来源: 解包整理/07_场景/%s (原版 Unity 序列化 JSON 说明书)' % args.arena)
+        # @tool: 编辑器 3D 视图中直接构建显示 (用户需在 Godot 编辑器打开场景点 3D 标签查看;
+        # 无 @tool 时内容仅运行时生成, 编辑器视口为空)
+        w.line('@tool')
         w.line('extends Node3D')
         w.line('')
         w.line('## 网格/贴图落地清单 (调试统计用)')
@@ -1029,15 +1718,30 @@ def main() -> int:
         w.line('\t_build()')
         w.line('')
         w.line('func _build() -> void:')
-        w.line('\tposition = Vector3(-100, 0, 0)  # 原版世界 x 基准 100 → 场景原点')
+        if args.mirror:
+            w.line('\t# --mirror 试验: MirrorX (X 镜像, 2026-08-23 已证弧朝外=错; 仅试验)')
+            w.line('\tposition = Vector3(-100, 0, 0)  # 原版世界 x 基准 100 → 场景原点')
+        elif args.no_mirror:
+            w.line('\t# --no-mirror 试验: 内容直挂 Unity 世界坐标 (2026-08-23 已证弧朝外=错; 仅试验)')
+        else:
+            w.line('\t# 默认 Z 反射方案 (2026-08-23 定案: 弧线左(右)朝内+太阳右+地面40% 全命中 = Unity 原样; X 镜像两方案均弧朝外)')
         w.line('')
-        w.line('\t# Unity(左手系, 相机+X 朝屏幕右)→Godot(右手系): 内容整体做一次 X 镜像')
-        w.line('\t# (绕相机 x=100 平面; 相机移出镜像根, 见下方 camera 分支), 否则画面左右互换')
-        w.line('\tvar mirror := Node3D.new()')
-        w.line("\tmirror.name = 'MirrorX'")
-        w.line('\tmirror.position = Vector3(200.0, 0.0, 0.0)')
-        w.line('\tmirror.scale = Vector3(-1.0, 1.0, 1.0)')
-        w.line('\tself.add_child(mirror)')
+        w.line('\t# Unity(左手系)→Godot(右手系) 手性: 默认 Z 镜像根 scale.z=-1 (不动 x, 非对称形状保持 Unity 原样);')
+        w.line('\t# --mirror 时 X 镜像根 (绕相机 x=100 平面); 相机移出镜像根见 camera 分支')
+        if args.mirror:
+            w.line('\tvar mirror := Node3D.new()')
+            w.line("\tmirror.name = 'MirrorX'")
+            w.line('\tmirror.position = Vector3(200.0, 0.0, 0.0)')
+            w.line('\tmirror.scale = Vector3(-1.0, 1.0, 1.0)')
+            w.line('\tself.add_child(mirror)')
+        elif args.no_mirror:
+            w.line('\tpass  # no_mirror: 无镜像根')
+        else:
+            w.line('\tvar mirror := Node3D.new()')
+            w.line("\tmirror.name = 'MirrorZ'")
+            w.line('\tmirror.position = Vector3(0.0, 0.0, 0.0)')
+            w.line('\tmirror.scale = Vector3(1.0, 1.0, -1.0)')
+            w.line('\tself.add_child(mirror)')
         w.line('')
 
         mat_line_buf = []  # 材质创建行 (每网格内联)
@@ -1049,6 +1753,8 @@ def main() -> int:
 
         def parent_ref(pt):
             """父变换节点变量名 (根/父被跳过时挂镜像根 mirror; 相机单独挂 self, 见 camera 分支)"""
+            if args.no_mirror:
+                return 'self'
             if pt is None:
                 return 'mirror'
             for k, tp2, gp2, nm2, py2, pp2 in all_nodes:
@@ -1117,9 +1823,15 @@ def main() -> int:
                 lines.append('%s.emission_enabled = true' % mv)
                 lines.append('%s.emission_energy_multiplier = %.3f' % (mv, mi.emission_energy()))
             lines.append('%s.roughness = 0.9' % mv)
+            lines.append('%s.specular_mode = BaseMaterial3D.SPECULAR_DISABLED' % mv)
             return lines
 
         bg_color = None  # 3D 相机 (BoardCamera) 的 m_BackGroundColor, 供环境背景用
+        BS_DEST = {}   # GO 名 -> 节点变量 (clip17 形态键目标)
+        BS_DEST_MESH = {}  # GO 名 -> mesh 名 (形态键网格)
+        CAM_VARS = {}  # 相机名 -> 节点变量 (clip16 Camera Intro 目标)
+        CAM_PITCH = {}  # 相机名 -> LensShift pitch 补偿角(度) (clip16 intro 终点用, 2026-08-23)
+        curves17c = clip_curves(os.path.join(SCENE_ROOT, args.arena), '17')
         for kind, tpid, gopid, nm, payload, parent_tpid in all_nodes:
             nv = node_var(gopid)
             cam_added = False
@@ -1134,16 +1846,38 @@ def main() -> int:
                 if ml is None:
                     w.line('\t# 跳过不可见网格: %s' % nm)
                     continue
-                w.line('\tvar %s := MeshInstance3D.new()' % nv)
-                w.line('\t%s.name = %r' % (nv, nm))
-                w.line('\t%s.mesh = load(%r)' % (nv, mesh_paths[payload]))
-                for l in ml:
-                    w.line('\t' + l)
-                # SkinnedMeshRenderer 薄片 (黑军团 Chain 链平面): 镜像 scale.x=-1 + yaw180 背面朝相机,
-                # cull_back 会被剔除 (原版单面可见) → SMR 网格强制双面
-                if a.has_smr(gopid):
-                    w.line('\t%s.cull_mode = BaseMaterial3D.CULL_DISABLED' % mv)
-                w.line('\t%s.material_override = %s' % (nv, mv))
+                if payload in BS_FILES:
+                    # 形态键网格 (黑军团 Chain 甩鞭): GLTF (morph targets+weights 动画, Godot 原生导入)
+                    bsdata = json.load(open(BS_FILES[payload], encoding='utf-8'))
+                    BS_DEST[nm] = nv
+                    BS_DEST_MESH[nm] = payload
+                    _tex_name = win_safe(mi.tex_name) if mi and mi.tex_name else ''
+                    rel = '../textures/%s.png' % _tex_name if _tex_name else ''
+                    anim = None
+                    if curves17c and curves17c['curves']:
+                        anim = {'curves': [c for c in curves17c['curves'] if c['node'] == nm],
+                                'length': 15.98, 'name': 'SceneAnim'}
+                    gltf_p = os.path.join(args.out, 'assets', 'meshes', win_safe(payload) + '.gltf')
+                    export_morph_gltf(gltf_p, mesh_paths[payload].replace('res://', args.out + '/'), bsdata, rel,
+                                      alpha_blend=mi.is_transparent() if mi else True,
+                                      double_sided=a.has_smr(gopid), anim=anim)
+                    gltf_res = 'res://assets/meshes/' + os.path.basename(gltf_p)
+                    w.line('\tvar %s: Node3D' % nv)
+                    w.line('\t%s = load(%r).instantiate()' % (nv, gltf_res))
+                    w.line('\t%s.name = %r' % (nv, nm))
+                    w.line('\tvar _ap%s: AnimationPlayer = %s.find_child("AnimationPlayer", true, false)' % (gopid, nv))
+                    w.line('\tif _ap%s: _ap%s.autoplay = "SceneAnim"' % (gopid, gopid))
+                else:
+                    w.line('\tvar %s := MeshInstance3D.new()' % nv)
+                    w.line('\t%s.name = %r' % (nv, nm))
+                    w.line('\t%s.mesh = load(%r)' % (nv, mesh_paths[payload]))
+                    for l in ml:
+                        w.line('\t' + l)
+                    # SkinnedMeshRenderer 薄片 (黑军团 Chain 链平面): 镜像 scale.x=-1 + yaw180 背面朝相机,
+                    # cull_back 会被剔除 (原版单面可见) → SMR 网格强制双面
+                    if a.has_smr(gopid):
+                        w.line('\t%s.cull_mode = BaseMaterial3D.CULL_DISABLED' % mv)
+                    w.line('\t%s.material_override = %s' % (nv, mv))
                 emit_local(nv, tpid)
                 w.line('\t%s.add_child(%s)' % (parent_ref(parent_tpid), nv))
                 w.line('')
@@ -1158,24 +1892,49 @@ def main() -> int:
                     continue  # reflection camera (原版 enabled=0) 不生成 — 否则先入树成 current 抢渲染
                 w.line('\tvar %s := Camera3D.new()' % nv)
                 w.line('\t%s.name = %r' % (nv, nm))
+                CAM_VARS[nm] = nv
                 cd = next(a.CAM[c] for c in a.go_comps[gopid] if c in a.CAM)
                 # 相机必须移出镜像根 (mirror 是反射, 相机带反射基 = 画面再次镜像);
                 # 位置 = 镜像世界坐标 (100 - p_u.x), 旋转 = conjX(q_u) ⊗ Y180
                 # (推导: R_g = M·R_u·D, M=reflect_x, D=RotX(180°) 手性修正)
                 wp, wq = world_chain(tpid)
-                w.line('\t%s.position = Vector3(%.4f, %.4f, %.4f)' % (nv, 200.0 - wp[0], wp[1], wp[2]))
-                # conjX(q) = (x, -y, -z, w)  (M·R·M 反射共轭)
-                qq = q_mul((wq[0], -wq[1], -wq[2], wq[3]), (0.0, 1.0, 0.0, 0.0))
+                if args.mirror:
+                    # MirrorX: 位置 = 镜像世界坐标 (200 - p_u.x), 旋转 = conjX(q_u) ⊗ Y180
+                    w.line('\t%s.position = Vector3(%.4f, %.4f, %.4f)' % (nv, 200.0 - wp[0], wp[1], wp[2]))
+                    # conjX(q) = (x, -y, -z, w)  (M·R·M 反射共轭)
+                    qq = q_mul((wq[0], -wq[1], -wq[2], wq[3]), (0.0, 1.0, 0.0, 0.0))
+                elif args.no_mirror:
+                    # --no-mirror: 内容直挂 Unity 世界系, 相机仅 Y180 左乘 (15轮前方案)
+                    w.line('\t%s.position = Vector3(%.4f, %.4f, %.4f)' % (nv, wp[0], wp[1], wp[2]))
+                    qq = q_mul((0.0, 1.0, 0.0, 0.0), wq)
+                else:
+                    # 默认 Z 反射: 相机移出 z 镜像根, 位置 z 取反 + 四元数 Z 反射共轭 (无 Y180, 2026-08-23 定案)
+                    w.line('\t%s.position = Vector3(%.4f, %.4f, %.4f)' % (nv, wp[0], wp[1], -wp[2]))
+                    qq = (-wq[0], -wq[1], wq[2], wq[3])
+                # Cinemachine m_Lens.LensShift.y → 相机 pitch 补偿 (2026-08-23 修正:
+                # 旧实现 frustum_offset 仅 PROJECTION_FRUSTUM 生效 → 默认 PERSPECTIVE 下 LensShift 从未生效
+                # = 画面 gate 偏移缺失 → 地平面偏低/"近了/看不全" 根因之一。
+                # LensShift=视口归一化 gate 偏移 (y-0.205=gate 下移) → 等效相机抬头角 atan(y*tan(fov/2))
+                _fov_v = cd.get('field of view') or 46.397
+                lsy = cd.get('m_LensShift', {}).get('y') or 0.0
+                if lsy and not args.no_lensshift:
+                    import math as _m
+                    _theta = _m.atan(lsy * _m.tan(_m.radians(_fov_v) / 2.0))
+                    _rt = _m.cos(_theta / 2.0)
+                    _rs = _m.sin(_theta / 2.0)
+                    # 绕本地 X 旋转: gate 下移=等效俯视(参考图地平面更宽/更俯视, 2026-08-23 vision 实测符号);
+                    # RotX(+theta) 后乘
+                    qq = q_mul(qq, (_rs, 0.0, 0.0, _rt))
+                    CAM_PITCH[nm] = _m.degrees(_theta)
+                    print('  [camera] LensShift y=%.3f → pitch %+.2f°' % (lsy, CAM_PITCH[nm]))
+                    print('  [camera] LensShift y=%.3f → pitch %+.2f°' % (lsy, _m.degrees(_theta)))
                 w.line('\t%s.quaternion = Quaternion(%.6f, %.6f, %.6f, %.6f)' % (nv, qq[0], qq[1], qq[2], qq[3]))
                 w.line('\t%s.scale = Vector3(%.6f, %.6f, %.6f)' % (nv, 1.0, 1.0, 1.0))
-                fov = cd.get('field of view')
+                fov = _fov_v
                 if fov:
                     w.line('\t%s.fov = %.3f' % (nv, float(fov)))
                 w.line('\t%s.near = %.4f' % (nv, float(cd.get('near clip plane', 0.3))))
                 w.line('\t%s.far = %.4f' % (nv, float(cd.get('far clip plane', 300.0))))
-                # CinemachineVirtualCamera m_Lens.LensShift.y=-0.205 → Godot frustum_offset
-                if cd.get('m_LensShift', {}).get('y'):
-                    w.line('\t%s.frustum_offset = Vector2(0, %.4f)' % (nv, float(cd.get('m_LensShift').get('y')) * 0.86))
                 if bg_color is None and 'UI' not in nm:
                     bc = cd.get('m_BackGroundColor') or {}
                     bg_color = (float(bc.get('r', 0.0288)), float(bc.get('g', 0.0288)), float(bc.get('b', 0.0294)))
@@ -1298,6 +2057,42 @@ def main() -> int:
             w.line('\tadd_child(pp)')
             break
 
+        # ---- Camera Intro 接入 (clip16 Once 2.5s 相机入场, 20轮续; clip17 链动画已进 GLTF) ----
+        c16 = clip16_curves(os.path.join(SCENE_ROOT, args.arena))
+        cam_nv = CAM_VARS.get('BoardCamera') or CAM_VARS.get('boardcamera')
+        if c16 and c16.get('pos') and cam_nv:
+            w.line('')
+            pos = c16['pos']
+            p0, p1 = pos[0]['v'], pos[-1]['v']
+            # 三分支坐标换算 (2026-08-23 修复: clip16 曲线必须与相机方案同坐标系, 此前仅 mirror-x 换算):
+            # mirror-x: godot_x = 100 - unity_x; no-mirror: 原样; z 反射(默认): x 原样 + z 取反
+            if args.mirror:
+                p0x, p0y, p0z = 100.0 - p0['x'], p0['y'], p0['z']
+                p1x, p1y, p1z = 100.0 - p1['x'], p1['y'], p1['z']
+            elif args.no_mirror:
+                p0x, p0y, p0z = 100.0 + p0['x'], p0['y'], p0['z']
+                p1x, p1y, p1z = 100.0 + p1['x'], p1['y'], p1['z']
+            else:
+                # z 反射(默认): Unity 局部 x+100(父 BattlePrefab) → z 取反 (原点=世界)
+                p0x, p0y, p0z = 100.0 + p0['x'], p0['y'], -p0['z']
+                p1x, p1y, p1z = 100.0 + p1['x'], p1['y'], -p1['z']
+            rot = c16.get('rot') or []
+            r0x = rot[0]['v']['x'] if rot else 0.0
+            r1x = -CAM_PITCH.get('BoardCamera', 0.0) if CAM_PITCH else (rot[-1]['v']['x'] if rot else 0.0)
+            w.line('	# ==== Camera Intro (原版 clip16, 2.5s Once: 镜头 (3.06,2.64,9.86)进至静态位 + rotX 至 LensShift pitch) ====')
+            w.line('	_tgt_cam = %s' % cam_nv)
+            w.line('')
+            w.line('var _tgt_cam: Camera3D')
+            w.line('var _anim_t := 0.0')
+            w.line('')
+            w.line('func _process(delta: float) -> void:')
+            w.line('	_anim_t += delta')
+            w.line('	if _tgt_cam:')
+            w.line('		var _it := clampf(_anim_t / 2.5, 0.0, 1.0)')
+            w.line('		_tgt_cam.position = Vector3(%.4f, %.4f, %.4f).lerp(Vector3(%.4f, %.4f, %.4f), _it)' % (p0x, p0y, p0z, p1x, p1y, p1z))
+            w.line('		_tgt_cam.rotation_degrees.x = lerpf(%.4f, %.4f, _it)' % (r0x, r1x))
+            w.line('		if _it >= 1.0:')
+            w.line('			_tgt_cam = null  # intro 结束: 停止每帧写相机 (2026-08-23: 此前永不释放, 覆盖 LensShift pitch/外部调整)')
     # 包装 tscn (挂脚本)
     out_tscn = os.path.join(args.out, 'scenes', 'unity_arena_%s.tscn' % args.arena)
     with open(out_tscn, 'w', encoding='utf-8') as f:
@@ -1307,6 +2102,9 @@ def main() -> int:
         f.write('script = ExtResource("1")\n')
 
     print('✓ 输出:', out_gd)
+    nfix = repair_uv_alpha(args, tex_paths)
+    if nfix:
+        print('✓ alpha 修复: %d 像素 (网格 UV 区内暗内容实体化)' % nfix)
     return 0
 
 
@@ -1321,7 +2119,9 @@ def smoke_lit(mi):
     return bool(re.search(r'(?i)smoke|steam|wispy', n)) and not re.search(r'(?i)additive|glow|ember|fire', n)
 
 
-def emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_expr='self', white_paths=None):
+def emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_expr='self', white_paths=None,
+                     world_rel=False):
+    """world_rel=True: 定位用 Unity 世界链 (粒子直挂 MirrorZ 包装根, 与 glTF 折入内容同手性)"""
     ps, render_mode, mref, mats = payload
     white_paths = white_paths or {}
     mi = mats[0] if mats else None
@@ -1373,6 +2173,9 @@ def emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_expr='self',
     w.line('\tvar %s := GPUParticles3D.new()' % nv)
     w.line('\t%s.name = %r' % (nv, nm))
     lt = a.local_trans(tpid)
+    if world_rel:
+        wp, wq = world_chain_of(a, tpid)
+        lt = (wp[0], wp[1], wp[2], wq, a.local_trans(tpid)[4])
     pos, q, sc = (lt[0], lt[1], lt[2]), lt[3], lt[4]
     w.line('\t%s.position = Vector3(%.4f, %.4f, %.4f)' % (nv, pos[0], pos[1], pos[2]))
     w.line('\t%s.quaternion = Quaternion(%.6f, %.6f, %.6f, %.6f)' % (nv, q[0], q[1], q[2], q[3]))
@@ -1499,7 +2302,7 @@ def emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_expr='self',
         if mi and mi.tex_name and mi.tex_name in tex_paths:
             w.line('\t%s.albedo_texture = load(%r)' % (mmv, tex_paths[mi.tex_name]))
         if mi and (mi.base_color or mi.mat_color):
-            w.line('\t%s.albedo_color = %s' % (mmv, col_str(mi.base_color or mi.mat_color)))
+            w.line('\t%s.albedo_color = %s' % (mmv, col_str_hdr(mi.base_color or mi.mat_color)))
         qdv = w.next_id('qd')
         w.line('\tvar %s := load(%r).duplicate()' % (qdv, mesh_res))
         w.line('\t%s.draw_pass_1 = %s' % (nv, qdv))
@@ -1536,7 +2339,7 @@ def emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_expr='self',
                 if mi.blend >= 2:
                     w.line('\t%s.blend_mode = BaseMaterial3D.BLEND_MODE_ADD' % mmv)
                 if mi.base_color or mi.mat_color:
-                    w.line('\t%s.albedo_color = %s' % (mmv, col_str(mi.base_color or mi.mat_color)))
+                    w.line('\t%s.albedo_color = %s' % (mmv, col_str_hdr(mi.base_color or mi.mat_color)))
             # UVModule 翻页分片: 材质分帧 + loop (anim_speed 已在 pmv 设置)
             if uv_en and tiles_x > 1 and tiles_y > 1:
                 w.line('\t%s.particles_anim_h_frames = %d' % (mmv, tiles_x))

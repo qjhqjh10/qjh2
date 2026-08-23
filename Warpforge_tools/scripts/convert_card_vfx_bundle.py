@@ -334,13 +334,8 @@ def main() -> int:
             "texture": ("res://assets/particles/tex3d_card/" + os.path.basename(tex_final)) if tex_final else "",
         }
 
-    def convert_guid(guid, vfx_name):
-        """预制体 → 主粒子 JSON + 子粒子; 返回 (文件名, 粒子数)"""
-        pptr = cont.get(guid)
-        if not pptr:
-            print('  ✗ GUID 不在 bundle:', guid)
-            return None, 0
-        root_go = pptr.m_PathID
+    def convert_root(root_go, vfx_name):
+        """根 GO path_id 直转 (通用事件 VFX 不在 card_vfx_tree 索引; 2026-08-23)"""
         gos = walk_tree(root_go)
         ps_gos = [g for g in gos if ps_by_go.get(g)]
         if not ps_gos:
@@ -407,6 +402,14 @@ def main() -> int:
             len(gos), n_ps, len(children)))
         return fp, n_ps
 
+    def convert_guid(guid, vfx_name):
+        """预制体 → 主粒子 JSON + 子粒子; 返回 (文件名, 粒子数)"""
+        pptr = cont.get(guid)
+        if not pptr:
+            print('  ✗ GUID 不在 bundle:', guid)
+            return None, 0
+        return convert_root(pptr.m_PathID, vfx_name)
+
     ok = 0
     done = set()
     if atk_mode:
@@ -439,15 +442,28 @@ def main() -> int:
         print('--atk 完成: 转换 %d 个 (去重 %d 唯一 GUID / %d 唯一预制体, 跳过已有 %d); 映射表 %s' % (
             ok, len(defs), len(guid_root), skipped, ATK_MAP))
         return 0
+    # 通用事件 VFX 根名直查索引 (不在 card_vfx_tree 的 bundle 根 GO;
+    # 如 Healing_Projectile/StunEffect/Summon_Generic 等战斗事件类; 2026-08-23)
+    go_by_name = {}
+    for pid, nm in go_names.items():
+        go_by_name.setdefault(nm, []).append(pid)
     for t in targets:
         if t in done:
             continue
         done.add(t)
         guid = base_to_guid.get(t)
-        if not guid:
-            print('✗ 无 GUID:', t)
+        if guid:
+            if convert_guid(guid, t):
+                ok += 1
             continue
-        if convert_guid(guid, t):
+        # fallback: bundle 根 GO 名直查
+        roots = go_by_name.get(t)
+        if not roots:
+            print('✗ 无 GUID/bundle 根名:', t)
+            continue
+        if len(roots) > 1:
+            print('  ⚠ %s 在 bundle 有 %d 个同名 GO, 取第一个' % (t, len(roots)))
+        if convert_root(roots[0], t):
             ok += 1
     print('完成 %d/%d' % (ok, len(targets)))
     return 0
