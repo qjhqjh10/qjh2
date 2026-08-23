@@ -5,12 +5,14 @@ convert_card_vfx_bundle.py — battleprefabs_vfxandmisc bundle 卡牌 VFX → pa
 任务⑩: card_anim_map GUID 反查 → 原版 3D 卡牌动画 VFX 预制体 → Godot 粒子数据
 输入: 原始 bundle (StreamingAssets/aa/StandaloneWindows64/battleprefabs_vfxandmisc_assets_all.bundle)
       data/card_vfx_tree.json (dump_card_vfx_tree.py 生成: GUID→定义名/根 GO/粒子分布)
-用法: python convert_card_vfx_bundle.py [--all | --names HeldrakeStrike,BansheeHowl]
+用法: python convert_card_vfx_bundle.py [--all | --names X,Y | --atk] [--2d]
+      --2d = 输出 data/particles/ 2D 20字段单主粒子 (unity_particles.gd 消费; 子粒子丢弃;
+             贴图写 assets/particles/ m_Name 命名), 需置于 --names/--all 之前 (2026-08-23)
       --all = 全部 400 预制体 (每预制体取主粒子系统)
       --atk = 攻击类全部 (01_卡牌/卡牌动画/MonoBehaviour 全部 Atk_* 定义 → GUID 去重 → 批量转换,
               命名用预制体根 GO 名; 输出 data/atk_vfx_map.json 定义名→预制体名映射)
-输出: D:/warpforge/data/particles3d/<VFX名>.json (与 convert_unity_particles.py --3d 同格式)
-      D:/warpforge/assets/particles/tex3d_card/*.png (贴图)
+输出: D:/warpforge/data/particles[3d]/<VFX名>.json (与 convert_unity_particles.py 同格式)
+      D:/warpforge/assets/particles/[tex3d_card/]*.png (贴图)
 """
 import json
 import os
@@ -23,7 +25,9 @@ sys.stdout.reconfigure(encoding='utf-8')
 BUNDLE = 'D:/2/Warhammer 40k Warpforge/Warpforge_Data/StreamingAssets/aa/StandaloneWindows64/battleprefabs_vfxandmisc_assets_all.bundle'
 TREE = 'D:/warpforge/data/card_vfx_tree.json'
 OUT_JSON = 'D:/warpforge/data/particles3d/'
+OUT_JSON2D = 'D:/warpforge/data/particles/'      # --2d 模式 (2026-08-23)
 OUT_TEX = 'D:/warpforge/assets/particles/tex3d_card/'
+OUT_TEX2D = 'D:/warpforge/assets/particles/'     # --2d 模式 (m_Name 命名, 与 2D 转换器一致)
 ATK_ANIM_DIR = 'D:/2/解包整理/01_卡牌/卡牌动画/MonoBehaviour'
 ATK_MAP = 'D:/warpforge/data/atk_vfx_map.json'
 
@@ -89,6 +93,28 @@ def cv(v, default=None):
     return v
 
 
+def cv2(v):
+    """MinMaxCurve → (min, max) (2026-08-23: 取到 maxScalar/maxCurve 上界)"""
+    if isinstance(v, dict):
+        st = v.get('minMaxState', 0)
+        if st == 0:
+            s = v.get('scalar')
+            return s, s
+        lo = v.get('minScalar')
+        hi = v.get('maxScalar')
+        if hi is None:
+            mc = v.get('maxCurve')
+            if isinstance(mc, dict):
+                if mc.get('scalar') is not None:
+                    hi = mc['scalar']
+                else:
+                    pts = mc.get('m_Curve') or []
+                    if pts:
+                        hi = pts[0].get('value')
+        return lo, hi
+    return v, v
+
+
 def main() -> int:
     import UnityPy
     env = UnityPy.load(BUNDLE)
@@ -142,8 +168,15 @@ def main() -> int:
     # 目标清单
     args = sys.argv[1:]
     atk_mode = False
+    as2d = False
     if args and args[0] == '--atk':
         atk_mode = True
+    elif args and args[0] == '--2d':          # --2d 模式 (2026-08-23): 输出 data/particles/ 20 字段单主粒子
+        as2d = True
+        args = args[1:]
+    out_json_dir = OUT_JSON2D if as2d else OUT_JSON
+    out_tex_dir = OUT_TEX2D if as2d else OUT_TEX
+    tex_prefix = '' if as2d else 'tex3d_card/'
     if not args or args == ['--all']:
         targets = sorted(base_to_guid.keys())
     elif args[0] == '--names':
@@ -152,14 +185,15 @@ def main() -> int:
         targets = args
 
     def extract_texture(ps_go_pid):
-        """GO → Renderer → Material → 贴图; 返回 (png路径, 贴图名)"""
+        """GO → Renderer → Material → 贴图; 返回 (png路径, 贴图名, render_mode) (2026-08-23: 读 m_RenderMode)"""
         rid = renderer_by_go.get(ps_go_pid)
         if not rid:
-            return None, None
+            return None, None, 0
         try:
             r = by_pathid[rid].read_typetree()
         except Exception:
-            return None, None
+            return None, None, 0
+        rm = r.get('m_RenderMode', 0)
         for m in r.get('m_Materials', []) or []:
             if not isinstance(m, dict):
                 continue
@@ -190,14 +224,34 @@ def main() -> int:
                     img = obj.image
                     if img is None:
                         continue
-                    os.makedirs(OUT_TEX, exist_ok=True)
+                    os.makedirs(out_tex_dir, exist_ok=True)
                     tname = str(obj.m_Name) or str(tid)
-                    fp = os.path.join(OUT_TEX, tname + '.png')
-                    img.save(fp)
-                    return fp, tname
+                    fp = os.path.join(out_tex_dir, tname + '.png')
+                    if os.path.exists(fp) and not as2d:
+                        return fp, tname, rm          # 3D: 幂等跳过
+                    # 2026-08-23: 预乘 alpha 修复 (同 convert_unity_particles.py — bundle 提取
+                    # 贴图 ~50-90% α 损坏: RGB 完整但 α≈0 → 内容透明化; 仅 --2d 强制重写修复)
+                    from PIL import Image
+                    rgba = img.convert('RGBA')
+                    w0, h0 = rgba.size
+                    px0 = rgba.load()
+                    n0 = tr0 = rgb_sum = 0
+                    for yy in range(0, h0, 2):
+                        for xx in range(0, w0, 2):
+                            n0 += 1
+                            p = px0[xx, yy]
+                            if p[3] < 10:
+                                tr0 += 1
+                            rgb_sum += (p[0] + p[1] + p[2]) / 3
+                    if as2d and n0 > 0 and tr0 / n0 > 0.5 and rgb_sum / n0 > 100:
+                        r, g, b, a = rgba.split()
+                        rgba = Image.merge('RGBA', (r, g, b, a.point(lambda v: 255)))
+                        print('  [alpha修复] %s (%d%% α=0)' % (tname, int(100 * tr0 / n0)))
+                    rgba.save(fp)
+                    return fp, tname, rm
                 except Exception:
                     continue
-        return None, None
+        return None, None, rm
 
     def walk_tree(root_go):
         """BFS Transform 子树 → [GO path_id] (根在前)"""
@@ -235,7 +289,7 @@ def main() -> int:
         im = ps.get('InitialModule', {})
         em = ps.get('EmissionModule', {})
         shp = ps.get('ShapeModule', {})
-        tex_path, tex_name = extract_texture(ps_target)
+        tex_path, tex_name, rm = extract_texture(ps_target)
         # 爆发
         bursts = []
         blist = em.get('m_Bursts') or em.get('bursts') or []
@@ -280,11 +334,11 @@ def main() -> int:
                 row, col = divmod(start_frame, frame_grid[0])
                 crop = img_tex.crop((col * fw, row * fh, (col + 1) * fw, (row + 1) * fh))
                 crop = crop.resize((128, 128), Image.LANCZOS)
-                tex_final = os.path.join(OUT_TEX, vfx_name + tex_suffix + '_frame.png')
+                tex_final = os.path.join(out_tex_dir, vfx_name + tex_suffix + '_frame.png')
                 crop.save(tex_final)
         sc = im.get('startColor', {})
         life = cv(im.get('startLifetime')) or 1.0
-        spd = cv(im.get('startSpeed')) or 0.0
+        spd_lo, spd_hi = cv2(im.get('startSpeed'))
         sz = cv(im.get('startSize')) or 1.0
         # Transform 偏移/缩放 (预制体局部)
         offset = [0, 0, 0]
@@ -300,24 +354,40 @@ def main() -> int:
                 except Exception:
                     pass
                 break
-        return {
-            "effect_offset": [round(v, 3) for v in offset],
-            "effect_scale": [round(v, 3) for v in escale],
+        common = {
             "system_lifetime": ps.get('lengthInSec', 1.0),
             "one_shot": not bool(ps.get('looping', False)),
             "play_on_awake": bool(ps.get('playOnAwake', True)),
             "amount": im.get('maxNumParticles', 100),
-            "lifetime_min": life,
-            "lifetime_max": life,
-            "speed_min": spd,
-            "speed_max": spd,
-            "size_min": sz,
-            "size_max": sz,
             "gravity": cv(im.get('gravityModifier')) or 0.0,
             "color_min": [sc.get('minColor', {}).get(k, 1.0) for k in 'rgba'] if sc.get('minColor') else [1, 1, 1, 1],
             "color_max": [sc.get('maxColor', {}).get(k, 1.0) for k in 'rgba'] if sc.get('maxColor') else [1, 1, 1, 1],
             "emission_rate": cv(em.get('rateOverTime')) or 0.0,
             "bursts": bursts,
+            "size_over_lifetime": size_curve,
+            "color_over_lifetime": color_curve,
+            "render_mode": rm,
+            "texture": ("res://assets/particles/" + tex_prefix + os.path.basename(tex_final)) if tex_final else "",
+        }
+        if as2d:
+            return dict(common, **{
+                "name": vfx_name,
+                "lifetime": life,
+                "speed_min": spd_lo or 0.0,
+                "speed_max": (spd_hi if spd_hi is not None else spd_lo) or 0.0,
+                "size_min": sz,
+                "size_max": sz,
+                "shape_type": shp.get('shapeType'),
+            })
+        return dict(common, **{
+            "effect_offset": [round(v, 3) for v in offset],
+            "effect_scale": [round(v, 3) for v in escale],
+            "lifetime_min": life,
+            "lifetime_max": life,
+            "speed_min": spd_lo or 0.0,
+            "speed_max": (spd_hi if spd_hi is not None else spd_lo) or 0.0,
+            "size_min": sz,
+            "size_max": sz,
             "shape": {
                 'type': shp.get('shapeType', 0),
                 'radius': cv(shp.get('radius'), 1),
@@ -328,11 +398,7 @@ def main() -> int:
             },
             "velocity": {},
             "rot_z_speed": 0.0,
-            "size_over_lifetime": size_curve,
-            "color_over_lifetime": color_curve,
-            "render_mode": 0,
-            "texture": ("res://assets/particles/tex3d_card/" + os.path.basename(tex_final)) if tex_final else "",
-        }
+        })
 
     def convert_root(root_go, vfx_name):
         """根 GO path_id 直转 (通用事件 VFX 不在 card_vfx_tree 索引; 2026-08-23)"""
@@ -363,7 +429,11 @@ def main() -> int:
                               (pair.get('value') if isinstance(pair, dict) else None)
                         tid = tev.get('m_Texture', {}).get('m_PathID') if isinstance(tev, dict) else None
                         if tid:
-                            return True
+                            # 2026-08-23: 必须验证纹理对象真实存在本 bundle (同名 pid 可能在
+                            # battlesharedresources — has_tex 曾误判 Sparks → 主粒子选到无贴图者)
+                            to = by_pathid.get(tid)
+                            if to is not None and to.type.name == 'Texture2D':
+                                return True
                 return False
             except Exception:
                 return False
@@ -378,26 +448,30 @@ def main() -> int:
         if main_d is None:
             return None, 0
         children = []
-        for g in ps_gos:
-            if g == main_g:
-                continue
-            d = build_particle(g, vfx_name, '_c%d' % len(children))
-            if d is not None:
-                d['go'] = go_names.get(g, '?')
-                children.append(d)
-            if len(children) >= 12:
-                break   # 子粒子数量钳制 (运行时性能)
+        if not as2d:
+            for g in ps_gos:
+                if g == main_g:
+                    continue
+                d = build_particle(g, vfx_name, '_c%d' % len(children))
+                if d is not None:
+                    d['go'] = go_names.get(g, '?')
+                    children.append(d)
+                if len(children) >= 12:
+                    break   # 子粒子数量钳制 (运行时性能)
+        elif len(ps_gos) > 1:
+            print('  [2D] %s: 合并特效子粒子 %d 个丢弃 (unity_particles.gd 单粒子模式, 仅取主粒子)'
+                  % (vfx_name, len(ps_gos) - 1))
         out = {"name": vfx_name}
         out.update(main_d)
         if children:
             out["children"] = children
-        os.makedirs(OUT_JSON, exist_ok=True)
-        fp = os.path.join(OUT_JSON, vfx_name + '.json')
+        os.makedirs(out_json_dir, exist_ok=True)
+        fp = os.path.join(out_json_dir, vfx_name + '.json')
         with open(fp, 'w', encoding='utf-8') as f:
             json.dump(out, f, ensure_ascii=False, indent=1)
         n_ps = len(ps_gos)
         print('✓ %s: lifetime=%s size=%s bursts=%s tex=%s (GO %d/粒子 %d/子粒子 %d)' % (
-            vfx_name, main_d['lifetime_min'], main_d['size_min'], main_d['bursts'],
+            vfx_name, main_d['lifetime_min' if not as2d else 'lifetime'], main_d['size_min'], main_d['bursts'],
             os.path.basename(main_d['texture']) if main_d['texture'] else '无',
             len(gos), n_ps, len(children)))
         return fp, n_ps
