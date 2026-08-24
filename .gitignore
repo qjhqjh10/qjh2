@@ -39,6 +39,9 @@ Warpforge备份/
 
 # ===== 生成产物（战场演示: 生成的 OBJ/贴图/截图，不入库）=====
 战场演示/
+# .NET 编译产物（SceneJumpShot 源码入库，bin/obj 不入）
+Warpforge_tools/scenejumpshot/bin/
+Warpforge_tools/scenejumpshot/obj/
 
 # ===== 大备份/中间产物（2026-08-23 上传前核查）=====
 新解包资源/

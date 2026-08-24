@@ -136,6 +136,21 @@ def reflect_x_q(q):
     return (q[0], -q[1], -q[2], q[3])
 
 
+def q_light_godot(q):
+    """Unity 方向光四元数 → Godot 灯光四元数 (坑85, 2026-08-25; 全部 (x,y,z,w) 序)
+    ⚠️ 2026-08-25 已实测证伪并停用 (见 light 分支注释): 本函数结果为背光方向 (全场 35.0 lum vs
+    已校准 97.5/95.5=原版 RT) — 保留仅作历史记录, 勿接入。
+    Unity 光方向 = q·(0,-1,0) (默认垂直向下); Z 反射世界 → (dx,dy,-dz);
+    Godot: 灯照射 = B·(0,0,-1) → B = rot_from_to((0,0,-1), 目标) 同 glTF 分支"""
+    d = q_rot_vec(q, (0.0, -1.0, 0.0))
+    g = (d[0], d[1], -d[2])
+    n = math.sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2])
+    if n == 0.0:
+        return (0.0, 0.0, 0.0, 1.0)
+    g = (g[0] / n, g[1] / n, g[2] / n)
+    return rot_from_to((0.0, 0.0, -1.0), g)
+
+
 def curve_min_max(v, default=1.0):
     if isinstance(v, dict):
         if v.get('minMaxState', 0) == 0:
@@ -471,11 +486,16 @@ def parse_mat(raw, name_hint=''):
             tex_ref = t
     uv = floats.get('_UVSpeed')
     uv_speed = (float(uv.get('x', 1.0)), float(uv.get('y', 1.0))) if isinstance(uv, dict) else None
+    # 2026-08-24 坑83: _Cull=0(双面)/_ZWrite=0 被 "or 默认值" 吞掉 (0.0 or 2.0 → 2.0) —
+    # 全场景 Fence/Floor(双面)定向为单面、透明材质 zwrite 错置 → 必须 None 判空
+    cull_v = floats.get('_Cull')
+    zw_v = floats.get('_ZWrite')
+    blend_v = floats.get('_Blend')
     return MatInfo(str(raw.get('m_Name') or name_hint), tex_ref,
-                   float(floats.get('_Blend', 0.0) or 0.0),
+                   float(blend_v if blend_v is not None else 0.0),
                    list(raw.get('m_ValidKeywords', []) or []),
-                   float(floats.get('_Cull', 2.0) or 2.0),
-                   float(floats.get('_ZWrite', 1.0) or 1.0),
+                   float(cull_v if cull_v is not None else 2.0),
+                   float(zw_v if zw_v is not None else 1.0),
                    colors.get('_BaseColor') or colors.get('_Color'),
                    colors.get('_EmissionColor'), uv_speed,
                    raw.get('m_Color') or colors.get('m_Color'),
@@ -728,6 +748,11 @@ def repair_uv_alpha(args, tex_paths):
         if 'Banners' in tn or 'Ground' in tn:
             print(f"[repair] skip (原版 alpha=设计值): {tn}")
             continue
+        if 'Baked' in tn:
+            # 烘焙图全图=网格共用内容 (UV 区外=其他网格的真实区域), alpha 通道是 Cutout 关键
+            # (原版 _ALPHATEST_ON; 2026-08-25 Vehicle 黑块根因), 不得实体化 — 保持原版 alpha
+            print(f"[repair] skip (烘焙图 alpha=Cutout 关键): {tn}")
+            continue
         res = tex_paths.get(tn)
         p = res_to_fs(args.out, res) if res else None
         if not p or not os.path.exists(p):
@@ -793,6 +818,39 @@ def export_blend_shapes(name, obj, out_dir):
         return fp
     except Exception:
         return None
+
+
+def pad_blacken(args, tex_paths):
+    """padding 翻黑 (2026-08-25 坑89②白斑根治): 稀疏图集 padding=RGB 白+alpha0
+    (原版 URP _ALPHATEST_ON 裁掉/白板材质 RGB0.2 黑不可见) — 导出后直出材质 (UNSHADED) 下
+    若 UV 越界采样到 padding 会白块爆炸 → 全贴图 alpha<10 且 RGB 近白 texel 置黑 (内容区不受影响)"""
+    from PIL import Image
+    import numpy as np
+    n = 0
+    for tn, res in tex_paths.items():
+        p = res_to_fs(args.out, res) if res else None
+        if not p or not os.path.exists(p):
+            continue
+        try:
+            im = Image.open(p).convert('RGBA')
+        except Exception:
+            continue
+        arr = np.array(im)
+        if arr.shape[2] != 4:
+            continue
+        al = arr[:, :, 3]
+        mx = arr[:, :, :3].max(axis=2)
+        sel = (al < 10) & (mx > 200)
+        if not sel.any():
+            continue
+        arr[sel, 0] = 0
+        arr[sel, 1] = 0
+        arr[sel, 2] = 0
+        Image.fromarray(arr).save(p)
+        n += int(sel.sum())
+        print('[pad_black] %s: %d px' % (tn, int(sel.sum())))
+    print('✓ padding 翻黑: %d 像素' % n)
+    return n
 
 
 def clip_curves(arena_dir, clip):
@@ -1039,11 +1097,11 @@ def resolve_lut_res(args, a):
                         os.makedirs(os.path.dirname(lp), exist_ok=True)
                         limg.save(lp + '.tmp', format='PNG')
                         lp = dedupe_file(lp, lp + '.tmp', args.arena)
-                    return 'res://assets/textures/' + os.path.basename(lp)
+                    return RESP + 'textures/' + os.path.basename(lp)
         except Exception:
             pass
     if os.path.exists(os.path.join(args.out, 'assets', 'textures', 'LUT Normal.png')):
-        return 'res://assets/textures/LUT Normal.png'
+        return RESP + 'textures/LUT Normal.png'
     return None
 
 
@@ -1299,7 +1357,7 @@ def emit_gltf(args, a, all_nodes, mesh_paths, tex_paths, white_paths):
         w.line('\t_build()')
         w.line('')
         w.line('func _build() -> void:')
-        w.line('\tvar scene: Node3D = load(%r).instantiate()' % ('res://assets/meshes/' +
+        w.line('\tvar scene: Node3D = load(%r).instantiate()' % (RESP + 'meshes/' +
               os.path.basename(gltf_p)))
         # clip17 autoplay 必须在 add_child 之前设置 (AnimationPlayer 入树时读取 autoplay)
         w.line('\tvar _ap: AnimationPlayer = scene.find_child("AnimationPlayer", true, false)')
@@ -1356,7 +1414,7 @@ def emit_gltf(args, a, all_nodes, mesh_paths, tex_paths, white_paths):
             w.line('\tif %s:' % lvn)
             w.line('\t\t%s.light_energy = %.3f' % (lvn, energy))
             if shadow:
-                w.line('\t\t%s.shadow_enabled = true' % lvn)
+                w.line('\t\t%s.shadow_enabled = false  # RT 实证: 原版烘焙无实时投影 (2026-08-25)' % lvn)
         # 相机: 唯一 3D 相机 → current
         cam_name = cam_info['name'] or 'BoardCamera'
         w.line('')
@@ -1485,8 +1543,18 @@ def main() -> int:
                     help='方向光能量校准系数 (引擎差异: Unity SH 全阶+URP 直通 vs Godot 平场; 黑军团 1.1=参考亮度匹配 2026-08-23)')
     ap.add_argument('--ambient-energy', type=float, default=1.15,
                     help='环境光能量校准 (Unity 直通过曝, 引擎物理等效)')
+    ap.add_argument('--unshaded-bake', action='store_true',
+                    help='坑86b 实验: Baked 烘焙纹理材质用 SHADING_MODE_UNSHADED (贴图直出)')
+    ap.add_argument('--pad-black', action='store_true',
+                    help='坑89②: padding 翻黑 (alpha<10 且 RGB 近白 → 黑; 直出材质白斑根治)')
+    ap.add_argument('--res-prefix', default='',
+                    help='资源 res:// 前缀子目录 (12 变体用 assets/arenas/<arena>)')
+    ap.add_argument('--unshaded-gain', type=float, default=1.0,
+                    help='UNSHADED 材质全局 albedo 增益 (原版≈贴图×URP后处理≈0.82)')
     ap.add_argument('--no-lensshift', action='store_true',
                     help='跳过 LensShift→pitch 补偿 (pitch 方向实验未定, 回退用)')
+    ap.add_argument('--lensshift-deg', type=float, default=None,
+                    help='直接指定 LensShift 补偿俯角 (度, 负数=俯视; 覆盖公式 — 坑89 矩阵定案用)')
     ap.add_argument('--no-mirror', action='store_true',
                     help='试验: 内容直挂 Unity 世界系+相机仅 Y180 (2026-08-23 弧线朝外=错, 仅试验)')
     ap.add_argument('--mirror', action='store_true',
@@ -1495,6 +1563,7 @@ def main() -> int:
                     help="gd=GDScript 场景脚本 (默认); gltf=场景级 glTF 原生导入 (方案A: "
                          "Mesh+材质+贴图+相机/灯+手性一次性导出, 无负 scale)")
     args = ap.parse_args()
+    RESP = 'res://assets/' + (args.res_prefix + '/' if args.res_prefix else '')
     skips = [s.strip() for s in args.skip.split(',') if s.strip()]
 
     a = Assembler(args.arena, args.out)
@@ -1562,7 +1631,7 @@ def main() -> int:
             imp = p + '.import'
             if os.path.exists(imp):
                 os.remove(imp)
-        res = 'res://assets/meshes/' + os.path.basename(p)
+        res = RESP + 'meshes/' + os.path.basename(p)
         mesh_paths[name] = res
         # 形态键网格 → blendshapes.json (clip17 链甩鞭动画数据源)
         if obj is not None and name not in BS_FILES:
@@ -1599,7 +1668,7 @@ def main() -> int:
             else:
                 print('  [贴图导出失败] %s' % tn)
                 return None
-        res = 'res://assets/textures/' + os.path.basename(p)
+        res = RESP + 'textures/' + os.path.basename(p)
         tex_paths[tn] = res
         return res
 
@@ -1661,7 +1730,7 @@ def main() -> int:
                         wp = os.path.join(os.path.dirname(fp), 'white_' + os.path.basename(fp))
                         make_white_tex(fp, wp)
                         if os.path.exists(wp):
-                            white_paths[mi.tex_name] = 'res://assets/textures/' + os.path.basename(wp)
+                            white_paths[mi.tex_name] = RESP + 'textures/' + os.path.basename(wp)
                 payload = (ps, render_mode, mref, mats)
                 # renderMode=4 (Mesh): 粒子用网格 draw pass (Light Shaft Plane1x1 等)
                 if render_mode == 4 and mref and mref.get('m_PathID'):
@@ -1692,6 +1761,10 @@ def main() -> int:
     if args.fmt == 'gltf':
         emit_gltf(args, a, all_nodes, mesh_paths, tex_paths, white_paths)
         nfix = repair_uv_alpha(args, tex_paths)
+        if args.pad_black:
+            pad_blacken(args, tex_paths)
+        if args.pad_black:
+            pad_blacken(args, tex_paths)
         if nfix:
             print('✓ alpha 修复: %d 像素 (网格 UV 区内暗内容实体化)' % nfix)
         return 0
@@ -1809,7 +1882,12 @@ def main() -> int:
             lines.append('%s.albedo_texture = load(%r)' % (mv, tex_paths[mi.tex_name]))
             if mi.base_color:
                 lines.append('%s.albedo_color = ' % mv + col_str(mi.base_color))
-            if mi.is_transparent():
+            if '_ALPHATEST_ON' in mi.keywords:
+                # 原版 URP TransparentCutout: 烘焙图集=多层 alpha-cut (裁 padding → 底地板透出)
+                # 2026-08-25 坑89③ 构图定案: scissor 是构图必要项 (_Blend=0 → 门控独立于 is_transparent)
+                lines.append('%s.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR' % mv)
+                lines.append('%s.alpha_scissor_threshold = 0.5' % mv)
+            elif mi.is_transparent():
                 lines.append('%s.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA' % mv)
                 if mi.zwrite <= 0:
                     lines.append('%s.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED' % mv)
@@ -1822,6 +1900,12 @@ def main() -> int:
             if mi.emission_color:
                 lines.append('%s.emission_enabled = true' % mv)
                 lines.append('%s.emission_energy_multiplier = %.3f' % (mv, mi.emission_energy()))
+            if args.unshaded_bake and mi.tex_name and not mi.is_transparent():
+                # 坑86b 实验 (2026-08-25): 场景贴图=烘焙产物自带光照, UNSHADED=直出 (对照原版 RT 亮度; 透明 FX 除外);
+                # 原版=贴图×URP 后处理(LUT identity+bloom)≈×0.82 → --unshaded-gain 全局压暗
+                lines.append('%s.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED' % mv)
+                if abs(args.unshaded_gain - 1.0) > 1e-6:
+                    lines.append('%s.albedo_color *= %.4f' % (mv, args.unshaded_gain))
             lines.append('%s.roughness = 0.9' % mv)
             lines.append('%s.specular_mode = BaseMaterial3D.SPECULAR_DISABLED' % mv)
             return lines
@@ -1861,7 +1945,7 @@ def main() -> int:
                     export_morph_gltf(gltf_p, mesh_paths[payload].replace('res://', args.out + '/'), bsdata, rel,
                                       alpha_blend=mi.is_transparent() if mi else True,
                                       double_sided=a.has_smr(gopid), anim=anim)
-                    gltf_res = 'res://assets/meshes/' + os.path.basename(gltf_p)
+                    gltf_res = RESP + 'meshes/' + os.path.basename(gltf_p)
                     w.line('\tvar %s: Node3D' % nv)
                     w.line('\t%s = load(%r).instantiate()' % (nv, gltf_res))
                     w.line('\t%s.name = %r' % (nv, nm))
@@ -1914,20 +1998,25 @@ def main() -> int:
                 # Cinemachine m_Lens.LensShift.y → 相机 pitch 补偿 (2026-08-23 修正:
                 # 旧实现 frustum_offset 仅 PROJECTION_FRUSTUM 生效 → 默认 PERSPECTIVE 下 LensShift 从未生效
                 # = 画面 gate 偏移缺失 → 地平面偏低/"近了/看不全" 根因之一。
-                # LensShift=视口归一化 gate 偏移 (y-0.205=gate 下移) → 等效相机抬头角 atan(y*tan(fov/2))
+                # LensShift=视口归一化 gate 偏移 (y-0.205=gate 下移) → 等效相机俯角 atan(y*tan(fov/2))
+                # 2026-08-25 夜投影校准 (坑89): 地面地标序列 0°→484 / +5.02°→592(目标 586) 单调 →
+                # 真值 = **+4.74° (上仰)**; 08-23 原公式符号即正确 (lsy=-0.205 → +5.02);
+                # 上午"翻转"两次均为误 (测量受光照态干扰) — 勿再动符号
                 _fov_v = cd.get('field of view') or 46.397
                 lsy = cd.get('m_LensShift', {}).get('y') or 0.0
                 if lsy and not args.no_lensshift:
                     import math as _m
-                    _theta = _m.atan(lsy * _m.tan(_m.radians(_fov_v) / 2.0))
+                    if args.lensshift_deg is not None:
+                        # 矩阵定案用: 直接指定俯角度数 (覆盖公式; 负=俯视, 正=上仰)
+                        _theta = _m.radians(args.lensshift_deg)
+                    else:
+                        _theta = _m.atan(lsy * _m.tan(_m.radians(_fov_v) / 2.0))
                     _rt = _m.cos(_theta / 2.0)
                     _rs = _m.sin(_theta / 2.0)
-                    # 绕本地 X 旋转: gate 下移=等效俯视(参考图地平面更宽/更俯视, 2026-08-23 vision 实测符号);
-                    # RotX(+theta) 后乘
+                    # 绕本地 X 旋转后乘
                     qq = q_mul(qq, (_rs, 0.0, 0.0, _rt))
                     CAM_PITCH[nm] = _m.degrees(_theta)
                     print('  [camera] LensShift y=%.3f → pitch %+.2f°' % (lsy, CAM_PITCH[nm]))
-                    print('  [camera] LensShift y=%.3f → pitch %+.2f°' % (lsy, _m.degrees(_theta)))
                 w.line('\t%s.quaternion = Quaternion(%.6f, %.6f, %.6f, %.6f)' % (nv, qq[0], qq[1], qq[2], qq[3]))
                 w.line('\t%s.scale = Vector3(%.6f, %.6f, %.6f)' % (nv, 1.0, 1.0, 1.0))
                 fov = _fov_v
@@ -1948,10 +2037,11 @@ def main() -> int:
                 lt = a.local_trans(tpid)
                 pos, q, sc = (lt[0], lt[1], lt[2]), lt[3], lt[4]
                 w.line('\t%s.position = Vector3(%.4f, %.4f, %.4f)' % (nv, pos[0], pos[1], pos[2]))
-                # Unity 定向灯旋转 R 时照亮方向 = R·(0,-1,0) (默认垂直向下);
-                # Godot 灯照亮 = B·(0,0,-1) → B = R ⊗ RotX(-90)
-                qq = q_mul(q, (-0.70710678, 0.0, 0.0, 0.70710678))
-                w.line('\t%s.quaternion = Quaternion(%.6f, %.6f, %.6f, %.6f)' % (nv, qq[0], qq[1], qq[2], qq[3]))
+                # 坑85 (2026-08-25): 曾断言旧公式 B = R ⊗ Rx(-90) "结果=光向上(照天)" 并把 q_light_godot 定为正解 —
+                # 2026-08-25 重生成 A/B 实测推翻: 旧公式=已校准 98.1/97.5 vs 原版 RT 95.5 ✓;
+                # q_light_godot 新版=全场 35.0 (背光). 恢复旧公式, 勿再改 (校准基准=Unity参照管线 RT 亮度)
+                qg = q_mul(q, (-math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5)))
+                w.line('\t%s.quaternion = Quaternion(%.6f, %.6f, %.6f, %.6f)' % (nv, qg[0], qg[1], qg[2], qg[3]))
                 # 按说明书: Light m_Color(1,1,1) 白光 + m_Intensity 1.0 直通 (此前暖色修正的依据
                 # "原版白光→含 LUT 暖调" 已被推翻: ColorLookup=LUT Normal identity → 无暖调, 颜色零自造)
                 lc = ld.get('m_Color', {}) or {}
@@ -1963,7 +2053,7 @@ def main() -> int:
                 w.line('\t%s.light_energy = %.3f' % (nv, float(ld.get('m_Intensity', 1.0) or 1.0) * args.light_energy))
                 sh = ld.get('m_Shadows', {})
                 if sh.get('m_Type', 0) != 0 and ld.get('m_Type') == 1:
-                    w.line('\t%s.shadow_enabled = true' % nv)
+                    w.line('\t%s.shadow_enabled = false  # RT 实证: 原版烘焙无实时投影 (2026-08-25)' % nv)
             else:  # container
                 w.line('\tvar %s := Node3D.new()' % nv)
                 w.line('\t%s.name = %r' % (nv, nm))
@@ -2042,11 +2132,11 @@ def main() -> int:
                                 os.makedirs(os.path.dirname(lp), exist_ok=True)
                                 limg.save(lp + '.tmp', format='PNG')
                                 lp = dedupe_file(lp, lp + '.tmp', args.arena)
-                            lut_res = 'res://assets/textures/' + os.path.basename(lp)
+                            lut_res = RESP + 'textures/' + os.path.basename(lp)
                 except Exception:
                     lut_res = None
             if lut_res is None and os.path.exists(os.path.join(args.out, 'assets', 'textures', 'LUT Normal.png')):
-                lut_res = 'res://assets/textures/LUT Normal.png'  # 回退: LUT Blender 共享默认(黑军团)
+                lut_res = RESP + 'textures/LUT Normal.png'  # 回退: LUT Blender 共享默认(黑军团)
             if lut_res:
                 w.line('\tpm.set_shader_parameter("lut", load(%r))' % lut_res)
                 w.line('\tpm.set_shader_parameter("lut_contribution", 1.0)')

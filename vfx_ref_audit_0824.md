@@ -1,0 +1,391 @@
+# VFX 覆盖率审计 (2026-08-24 23:09)
+
+- 说明书 VFX 根: **977**
+- 已转换(particles/particles3d/assets 命中): **673**
+- 未命中: **304** (含事件引用/近似名未对齐的, 需人工判读)
+
+## 优先级未接入 (关键词: hit/impact/death/explosion/attack/summon/buff/heal...)
+
+(74 个)
+
+- `AcidSpraySweepAttack`
+- `Buff EC Stimulate passive`
+- `Buff_Chaos_Star`
+- `Buff_DA_Forest_Self`
+- `Buff_DA_Forest_Target`
+- `Buff_Drach'nyen`
+- `Buff_EnemyHand_GSC`
+- `Buff_FriendlyHand_GSC`
+- `Buff_GSC`
+- `Buff_Green_Agenda`
+- `Buff_Green_DA`
+- `Buff_Green_Intense`
+- `Buff_Hand_1`
+- `Buff_Hand_UM`
+- `Buff_Mana`
+- `Buff_Mana_2`
+- `Buff_Mana_3 Holy`
+- `Buff_Mana_Blood`
+- `Buff_Orange`
+- `Buff_Purple`
+- `Buff_Red`
+- `Buff_Red_Intense`
+- `Buff_Red_ork`
+- `Buff_SW_Lightning`
+- `Buff_SW_Lightning_quick`
+- `Buff_SW_Rune_Tornado`
+- `Buff_SW_Runes_Blizzard OLD`
+- `Buff_Sautekh_Intense`
+- `Buff_Tau_Intense`
+- `Buff_Tau_Kroot`
+- `Buff_Tau_Kroot_FriendlyBoard`
+- `Buff_Tau_Kroot_intense`
+- `Buff_Tau_Water`
+- `Buff_Tyranid HP`
+- `BulletImpact_1shot_pointblank`
+- `BulletImpact_2shot_ork`
+- `BulletImpact_2shot_pointblank_chaos`
+- `BulletImpact_3shot_pointblank`
+- `BulletImpact_BulletHole`
+- `BulletImpact_DeathSpinner Test`
+- `BulletImpact_Kroot_KrootGun OLD`
+- `Card_Buff_Sabotage_trigger`
+- `Debuff_Mana_Tyranid`
+- `DeckBuff Grey`
+- `DeckBuff1`
+- `DeckBuff_GSC`
+- `DeckBuff_Green`
+- `DeckBuff_Green 2`
+- `DeckBuff_MoveToTop`
+- `DeckBuff_Orks`
+- `DeckBuff_SW`
+- `Emperors Children Generic Buff Record`
+- `Environmental Condition Astra Militarum Dawn Attack`
+- `Flayed One Summon`
+- `GSC Summon`
+- `HealIcon`
+- `Invoke Minion Hits Ground`
+- `Invoke Minion Hits Ground Legendary`
+- `Kroot_Summon_quick`
+- `Necrons death explosion`
+- `OrkBuffGreenWaaagh`
+- `OrkBuff_Recall`
+- `OrkBuff_Snakebitez_1`
+- `OrkBuff_Snakebitez_1_2D_SFX`
+- `OrkBuff_Snakebitez_1_NoIcon`
+- `OrkBuff_Snakebitez_1_Quick`
+- `OrkBuff_Snakebitez_2`
+- `OrkBuff_Snakebitez_2_Intense`
+- `SW_Axe_Buff`
+- `Sororitas Summon Basic`
+- `Sororitas Summon Resurrect`
+- `Tau Buff Ranged`
+- `Teleport Trait Summon`
+- `Vortex Warhead Impact`
+
+## 全部未命中 (304)
+
+- `Acid Rain Damage Target`
+- `AcidSpraySweepAttack`
+- `AmbushEffect`
+- `Antimatter Explosion`
+- `Armor_Necron`
+- `Armour Background`
+- `ArmourEffect_Nurgle`
+- `Artillery Manticore down 1x`
+- `Artillery Manticore down 2x spread`
+- `Artillery Manticore down 4x`
+- `Artillery Manticore down 4x spread`
+- `Artillery Manticore up 2x`
+- `Artillery Manticore up 4x`
+- `Aura_WhileInPlay_1`
+- `Aura_WhileInPlay_2`
+- `BacklashEffect`
+- `Blind_continuous_effect`
+- `BloodySplash`
+- `Bolter Casing_Imperial`
+- `Bolter Casing_Orks`
+- `Bolter Casing_Traitor`
+- `Buff EC Stimulate passive`
+- `Buff_Chaos_Star`
+- `Buff_DA_Forest_Self`
+- `Buff_DA_Forest_Target`
+- `Buff_Drach'nyen`
+- `Buff_EnemyHand_GSC`
+- `Buff_FriendlyHand_GSC`
+- `Buff_Green_Agenda`
+- `Buff_Green_DA`
+- `Buff_Green_Intense`
+- `Buff_GSC`
+- `Buff_Hand_1`
+- `Buff_Hand_UM`
+- `Buff_Mana`
+- `Buff_Mana_2`
+- `Buff_Mana_3 Holy`
+- `Buff_Mana_Blood`
+- `Buff_Orange`
+- `Buff_Purple`
+- `Buff_Red`
+- `Buff_Red_Intense`
+- `Buff_Red_ork`
+- `Buff_Sautekh_Intense`
+- `Buff_SW_Lightning`
+- `Buff_SW_Lightning_quick`
+- `Buff_SW_Rune_Tornado`
+- `Buff_SW_Runes_Blizzard OLD`
+- `Buff_Tau_Intense`
+- `Buff_Tau_Kroot`
+- `Buff_Tau_Kroot_FriendlyBoard`
+- `Buff_Tau_Kroot_intense`
+- `Buff_Tau_Water`
+- `Buff_Tyranid HP`
+- `BulletImpact_1shot_pointblank`
+- `BulletImpact_2shot_ork`
+- `BulletImpact_2shot_pointblank_chaos`
+- `BulletImpact_3shot_pointblank`
+- `BulletImpact_BulletHole`
+- `BulletImpact_DeathSpinner Test`
+- `BulletImpact_Kroot_KrootGun OLD`
+- `Card Info`
+- `Card_Buff_Sabotage_trigger`
+- `CardHalo`
+- `CardMulliganSelected`
+- `CardPrefab`
+- `Chaos_Destroy_Brutal`
+- `CodexEffect`
+- `CodexIdleEffect`
+- `ComboEffect`
+- `CompanionEffect`
+- `ConcussiveEffect`
+- `CreateCard Gold`
+- `CreateCard Sabotage`
+- `CrueltyEffect`
+- `Cut EC Reverse`
+- `Cut Termie Lightning Claws`
+- `Debuff_Mana_Tyranid`
+- `DeckBuff Grey`
+- `DeckBuff1`
+- `DeckBuff_Green`
+- `DeckBuff_Green 2`
+- `DeckBuff_GSC`
+- `DeckBuff_MoveToTop`
+- `DeckBuff_Orks`
+- `DeckBuff_SW`
+- `Default Tap Floor`
+- `DutyEffect`
+- `Earthquake Rockfall Board`
+- `Earthquake Rockfall Target`
+- `Earthquake Shake only`
+- `EC Heldrake Rally`
+- `EC_Sonic Shock`
+- `EC_Target_user`
+- `EC_Target_user Lucius`
+- `EffectAnchor`
+- `Emperors Children Generic Buff Record`
+- `Environmental Condition Astra Militarum Dawn Attack`
+- `Environmental Condition Astra Militarum Factory Overdrive`
+- `Environmental Condition Astra Militarum Planetary Invasion`
+- `Environmental Condition Black Legion Daemonic Feast`
+- `Environmental Condition Black Legion Helfire Outburst`
+- `Environmental Condition Black Legion Warp Storm`
+- `Environmental Condition Dark Angels Asteroid Zone`
+- `Environmental Condition Dark Angels Orbiting`
+- `Environmental Condition Dark Angels Void Combat`
+- `Environmental Condition Emperor's Children 1 Green`
+- `Environmental Condition Emperor's Children 1 Pink REJECTED`
+- `Environmental Condition Emperor's Children 2 Fumes`
+- `Environmental Condition Emperor's Children Empyric Rift`
+- `Environmental Condition Emperor's Children Empyric Rift OLD`
+- `Environmental Condition GSC Mining Tremors`
+- `Environmental Condition GSC Sump Overspill`
+- `Environmental Condition GSC Sump Overspill OLD`
+- `Environmental Condition GSC Toxic Fumes`
+- `Environmental Condition Necrons Earthquake`
+- `Environmental Condition Necrons Immortal Beams`
+- `Environmental Condition Necrons Solar Storm`
+- `Environmental Condition Particles Orbital`
+- `Environmental Condition Space Wolves Everstorm`
+- `Environmental Condition Space Wolves First Light`
+- `Environmental Condition Space Wolves Full Moon`
+- `EnvironmentalCondition Leviathan Acid Rain`
+- `EnvironmentalCondition Leviathan Blazing Biomatter`
+- `EnvironmentalCondition Leviathan Sweeping Infestation`
+- `EnvironmentalCondition Saim Hann Blackout`
+- `EnvironmentalCondition Saim Hann Webway Rift`
+- `EnvironmentalCondition Sororitas Disrupted Ceremony`
+- `EnvironmentalCondition Sororitas Raging Storm`
+- `EnvironmentalCondition Sororitas Shrine Bombardment`
+- `EnvironmentalCondition Tau Electro-Static Interference`
+- `EnvironmentalCondition Tau Radiation Storm`
+- `EnvironmentalCondition Tau Solar Eclipse`
+- `EnvironmentalCondition Ultramarines Aerial Clash`
+- `EnvironmentalCondition Ultramarines Bombardment`
+- `EnvironmentalCondition Ultramarines Thunderstorm`
+- `Explosion Hand UI`
+- `Explosion Hand UI 0,5s delay`
+- `Explosion Hive Fleet Arrival Explosions only`
+- `Explosion Hive Fleet Arrival Tendrils`
+- `Explosion Hive Fleet Arrival Tendrils OLD`
+- `Explosion_BombQuick`
+- `Explosion_BombQuick_triple`
+- `Explosion_Debris`
+- `Explosion_Debris_UI`
+- `Explosion_Ground`
+- `Explosion_GroundBreak`
+- `Explosion_Short`
+- `Factory Overdrive Damage`
+- `Faith UI Gain`
+- `Faith UI Trigger`
+- `FerocityEffect`
+- `FlameBurst_Sororitas`
+- `Flayed One Summon`
+- `FrenziedEffect`
+- `Gain_Sentry`
+- `Generic Tap Material`
+- `Goff_WaaaghRed`
+- `Goff_WaaaghRed_skulls`
+- `GSC RecallToHand`
+- `GSC Rockfall`
+- `GSC Sabotage Use`
+- `GSC Summon`
+- `Hammer_Throw_SW`
+- `HealIcon`
+- `Helfire Burst Target`
+- `HeroOfTheEmpire OLD`
+- `Hive Fleet Ground Growth`
+- `HuntMark_EndEffect`
+- `HuntMark_IdleEffect`
+- `HuntMark_StackEffect`
+- `Invoke Minion Card Fade Default`
+- `Invoke Minion Card Fade Legendary`
+- `Invoke Minion Hits Ground`
+- `Invoke Minion Hits Ground Legendary`
+- `Invoke Minion Legendary ALT`
+- `Kroot_Summon_quick`
+- `Lasrifle Offscreen Target`
+- `Lasrifle_offscreen`
+- `Lasrifle_offscreen_1x`
+- `Lasrifle_offscreen_5x`
+- `Lightning burst webway`
+- `Lightning_Green`
+- `MarkerlightExpire`
+- `MarkerlightIdle`
+- `MarkerlightProcEffect`
+- `MarkerlightTriggerDamage`
+- `MarkOfKhorne_enchantment`
+- `MarkOfNurgle_enchantment`
+- `MarkOfTzeentch_enchantment`
+- `Meteor Angled`
+- `MinionOrWarlord Container`
+- `MobEffect`
+- `Necron_Regenerate`
+- `Necrons death explosion`
+- `Oath_Effect`
+- `Offensive_Thunderstorm Target`
+- `Orbital 3 repeat`
+- `Orbital 4 repeat`
+- `Orbital 5 repeat`
+- `Orbital Bombardment Target`
+- `Ork Environmental Condition Dust`
+- `Ork_Rocket`
+- `Ork_RocketDown`
+- `Ork_RocketUp`
+- `Ork_Target`
+- `OrkBuff_Recall`
+- `OrkBuff_Snakebitez_1`
+- `OrkBuff_Snakebitez_1_2D_SFX`
+- `OrkBuff_Snakebitez_1_NoIcon`
+- `OrkBuff_Snakebitez_1_Quick`
+- `OrkBuff_Snakebitez_2`
+- `OrkBuff_Snakebitez_2_Intense`
+- `OrkBuffGreenWaaagh`
+- `Orks Environmental Condition Night`
+- `Pack_WhileInPlay`
+- `PenitenceEffect`
+- `Plasma_basic OLD`
+- `Possession_self`
+- `Pray_Exit`
+- `Pray_Idle`
+- `Pray_Start`
+- `Pray_Success`
+- `Protocol Base`
+- `Quest UI Gain`
+- `Quest UI Trigger`
+- `Railgun turret`
+- `RallyEffect`
+- `Recall_Eldar_2_quick_UI`
+- `Recall_Eldar_2_reverse`
+- `Recon Enemy Hand`
+- `Recon Enemy Hand Purple`
+- `Recon Scan`
+- `Recon Scan 2`
+- `Recon Scan Purple`
+- `RegimentEffect`
+- `Relentless Fusillade`
+- `Relentless Fusillade sniper`
+- `RelentlessEffect`
+- `Remnant Aeldari Collect particles`
+- `Remnant Aeldari Destroy particles`
+- `Remnant Necrons Destroy particles`
+- `RemnantBody3D Aeldari`
+- `RemnantBody3D Necrons`
+- `RocketTrail`
+- `Rockfall`
+- `Sau_MasterChronomancer`
+- `Screen_Gold`
+- `Screen_Red`
+- `Screen_Top_Green`
+- `SlayEffect`
+- `Smoke_Board`
+- `Smoke_Explosion`
+- `Sniper Target`
+- `SniperPreEffect`
+- `Solar Beam Target`
+- `Sororitas Summon Basic`
+- `Sororitas Summon Resurrect`
+- `Squig_BigChompaJaws`
+- `StealthEffect`
+- `StimulateEffect`
+- `StrikeEffect`
+- `SW_Axe_Buff`
+- `Swarm Card Merge VFX`
+- `Swarm_Trigger_OnTarget`
+- `Tactic Container`
+- `Talent_Warmaster`
+- `TalentEffect`
+- `Tank_Shot_Small`
+- `Tap Fire Eldar`
+- `Tap Firepit`
+- `Tap Firepit 2`
+- `Tap Floor Grille`
+- `Tap Plasma generator`
+- `Tap Rock`
+- `Tap Squig`
+- `Tap squishy`
+- `Tap Toxic Sludge`
+- `Tap Toxic Sludge green`
+- `Tap Webway Portal`
+- `Tau Buff Ranged`
+- `Tau_RailBombardment UNUSED`
+- `Telepathic_Control_User`
+- `Teleport Trait Summon`
+- `Teleport Trigger Board Effect Only`
+- `Teleport Trigger Effect Quick`
+- `Textbackgrounds`
+- `TideEffect`
+- `Trait_GainQuest`
+- `TraitorsHate_Target`
+- `Tyranid Spawn`
+- `UM_CardDraw`
+- `Uprising Trait`
+- `VanguardIdleEffect`
+- `Vortex Explosion Massive`
+- `Vortex Warhead Impact`
+- `Warp Storm Target`
+- `Waystone UI Gain`
+- `Waystone UI Spend`
+- `WaystoneCollect`
+- `WaystoneTrigger`
+- `WhileInPlay_Nurgle`
+- `WhileInPlay_Tzeentch`
+- `Wild Rider Chieftain`

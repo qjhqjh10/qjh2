@@ -36,7 +36,11 @@ for t in ['GameObject', 'RectTransform', 'Transform']:
     td = os.path.join(SRC, t)
     if not os.path.isdir(td):
         continue
-    for f in glob.glob(os.path.join(td, '*.json')):
+    files = glob.glob(os.path.join(td, '*.json'))
+    # 双份 pid 文件 (Type_<pid>_<pid>.json 拷贝) 排序靠后, 单份 (Type_<pid>.json) 优先 — 坑: 07_场景 双份 pid 文件串链 (2026-08-25)
+    files.sort(key=lambda f: 0 if (len(os.path.basename(f).rsplit('.json', 1)[0].rsplit('_', 1)) == 2
+                                   and os.path.basename(f).rsplit('.json', 1)[0].rsplit('_', 1)[1].lstrip('-').isdigit()) else 1)
+    for f in files:
         base = os.path.basename(f).rsplit('.json', 1)[0]
         m = base.rsplit('_', 1)
         pid = None
