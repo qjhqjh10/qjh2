@@ -138,8 +138,6 @@ def reflect_x_q(q):
 
 def q_light_godot(q):
     """Unity 方向光四元数 → Godot 灯光四元数 (坑85, 2026-08-25; 全部 (x,y,z,w) 序)
-    ⚠️ 2026-08-25 已实测证伪并停用 (见 light 分支注释): 本函数结果为背光方向 (全场 35.0 lum vs
-    已校准 97.5/95.5=原版 RT) — 保留仅作历史记录, 勿接入。
     Unity 光方向 = q·(0,-1,0) (默认垂直向下); Z 反射世界 → (dx,dy,-dz);
     Godot: 灯照射 = B·(0,0,-1) → B = rot_from_to((0,0,-1), 目标) 同 glTF 分支"""
     d = q_rot_vec(q, (0.0, -1.0, 0.0))
@@ -437,10 +435,7 @@ class BundleResolver:
 class MatInfo:
     def __init__(self, name, tex_ref, blend, keywords, cull, zwrite,
                  base_color, emission_color, uv_speed, mat_color=None,
-                 tex_ref2=None, vector4_1=None, cutoff=None, smoothness=None,
-                 metallic=None, surface=None, src_blend=None, dst_blend=None,
-                 alpha_clip=None, tex_scale=None, tex_offset=None,
-                 queue_offset=None, emission_tex_ref=None):
+                 tex_ref2=None, vector4_1=None):
         self.name = name
         self.tex_ref = tex_ref
         self.tex_name = None
@@ -457,18 +452,6 @@ class MatInfo:
         self.mat_color = mat_color
         self.uv_speed = uv_speed
         self.vector4_1 = vector4_1     # Runes 滚动参数 (r,g,b=tex2平铺, 滚动速率) 疑似 (1,1,0.02,0)
-        # 2026-08-26 B 映射表: 全参数字段 (原值; 缺失=None → emit 侧用 Godot 默认/Unity 默认)
-        self.cutoff = cutoff           # _Cutoff (URP) / _ClipThreshold (Everguild)
-        self.smoothness = smoothness   # _Smoothness → roughness=1-它
-        self.metallic = metallic       # _Metallic (21 个非0 金属)
-        self.surface = surface         # _Surface 0=Opaque 1=Transparent (B3 四元组主判据)
-        self.src_blend = src_blend     # _SrcBlend
-        self.dst_blend = dst_blend     # _DstBlend
-        self.alpha_clip = alpha_clip   # _AlphaClip
-        self.tex_scale = tex_scale     # _BaseMap/_MainTex m_Scale (uv1_scale, 25 个非单位)
-        self.tex_offset = tex_offset   # m_Offset (uv1_offset)
-        self.queue_offset = queue_offset  # _QueueOffset/m_CustomRenderQueue → render_priority
-        self.emission_tex_ref = emission_tex_ref  # _EmissionMap (84 个)
 
     def is_transparent(self):
         return '_SURFACE_TYPE_TRANSPARENT' in self.keywords or \
@@ -477,12 +460,6 @@ class MatInfo:
     def emission_energy(self):
         c = self.emission_color or {}
         return max(abs(c.get('r', 0.0)), abs(c.get('g', 0.0)), abs(c.get('b', 0.0)), 1.0)
-
-    def roughness(self):
-        # B 映射: roughness = 1 - _Smoothness (800 个默认 0.5 → 0.5; 引擎默认 0.9 保留为兜底)
-        if self.smoothness is not None:
-            return max(0.0, min(1.0, 1.0 - float(self.smoothness)))
-        return None
 
 
 def parse_mat(raw, name_hint=''):
@@ -512,43 +489,6 @@ def parse_mat(raw, name_hint=''):
     cull_v = floats.get('_Cull')
     zw_v = floats.get('_ZWrite')
     blend_v = floats.get('_Blend')
-    # 2026-08-26 B 映射表: 全参数读取 (None 判空延续)
-    cutoff_v = floats.get('_ClipThreshold')
-    if cutoff_v is None:
-        cutoff_v = floats.get('_Cutoff')
-    smooth_v = floats.get('_Smoothness')
-    metal_v = floats.get('_Metallic')
-    surf_v = floats.get('_Surface')
-    src_v = floats.get('_SrcBlend')
-    dst_v = floats.get('_DstBlend')
-    aclip_v = floats.get('_AlphaClip')
-    qoff_v = floats.get('_QueueOffset')
-    if qoff_v is None:
-        cq = raw.get('m_CustomRenderQueue')
-        if isinstance(cq, (int, float)) and cq > -1:
-            qoff_v = cq - 3000
-    # 贴图平铺/偏移 (m_TexEnvs 槽内 m_Scale/m_Offset)
-    ts = toff = None
-    for pair in texenvs:
-        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
-            continue
-        if pair[0] in ('_BaseMap', '_MainTex'):
-            v = pair[1] if isinstance(pair[1], dict) else {}
-            try:
-                sc = v.get('m_Scale', {})
-                ts = (float(sc.get('x', 1.0)), float(sc.get('y', 1.0)))
-                of = v.get('m_Offset', {})
-                toff = (float(of.get('x', 0.0)), float(of.get('y', 0.0)))
-            except Exception:
-                ts = toff = None
-            break
-    # _EmissionMap 引用
-    emis_tex = None
-    for pair in texenvs:
-        if isinstance(pair, (list, tuple)) and len(pair) == 2 and pair[0] == '_EmissionMap':
-            t = pair[1].get('m_Texture', {}) if isinstance(pair[1], dict) else {}
-            if t.get('m_PathID'):
-                emis_tex = t
     return MatInfo(str(raw.get('m_Name') or name_hint), tex_ref,
                    float(blend_v if blend_v is not None else 0.0),
                    list(raw.get('m_ValidKeywords', []) or []),
@@ -557,17 +497,7 @@ def parse_mat(raw, name_hint=''):
                    colors.get('_BaseColor') or colors.get('_Color'),
                    colors.get('_EmissionColor'), uv_speed,
                    raw.get('m_Color') or colors.get('m_Color'),
-                   tex_ref2, colors.get('Vector4_1'),
-                   float(cutoff_v) if cutoff_v is not None else None,
-                   float(smooth_v) if smooth_v is not None else None,
-                   float(metal_v) if metal_v is not None else None,
-                   float(surf_v) if surf_v is not None else None,
-                   float(src_v) if src_v is not None else None,
-                   float(dst_v) if dst_v is not None else None,
-                   float(aclip_v) if aclip_v is not None else None,
-                   ts, toff,
-                   float(qoff_v) if qoff_v is not None else None,
-                   emis_tex)
+                   tex_ref2, colors.get('Vector4_1'))
 
 
 # ---------------------------------------------------------------- 汇编
@@ -582,7 +512,6 @@ class Assembler:
         self.MF = load_pid_dir(os.path.join(self.root_dir, 'MeshFilter'))
         self.MR = load_pid_dir(os.path.join(self.root_dir, 'MeshRenderer'))
         self.SMR = load_pid_dir(os.path.join(self.root_dir, 'SkinnedMeshRenderer'))
-        self.LNR = load_pid_dir(os.path.join(self.root_dir, 'LineRenderer'))
         self.MAT = load_pid_dir(os.path.join(self.root_dir, 'Material'))
         self.PS = load_pid_dir(os.path.join(self.root_dir, 'ParticleSystem'))
         self.PSR = load_pid_dir(os.path.join(self.root_dir, 'ParticleSystemRenderer'))
@@ -810,7 +739,6 @@ def repair_uv_alpha(args, tex_paths):
         return 0
     n_total = 0
     for tn, rects in UV_RECTS.items():
-        print(f"[repair-debug] tn={tn!r} objs={len(UV_OBJS.get(tn, []))} rects={len(rects)}")
         # 三档策略 (2026-08-23 用户目视"上部灰白矩形"→ 子代理原版贴图逐像素核查):
         # Banners/Ground 原版 alpha 即设计值 (参考图证实横幅=镂空透光花纹, Ground 88.9% 基本完好,
         # 船影带 39-46% 半透明=原样) — 曾按"解码丢 alpha"误修→白占位/天空透光区被实体化=灰白矩形;
@@ -818,12 +746,6 @@ def repair_uv_alpha(args, tex_paths):
         if 'Banners' in tn or 'Ground' in tn:
             print(f"[repair] skip (原版 alpha=设计值): {tn}")
             continue
-        # 2026-08-26 正交实验A: Baked 恢复 skip (实体化后遮挡骷髅区=-83 无改善; Baked alpha-cut 多层透出=真语义)
-        # Back Background/Background 仍实体化 (82% 白 alpha0=按 RGB 渲染); Baked 保持原版 alpha
-        if 'Baked' in tn:
-            print(f"[repair] skip (Baked alpha-cut 多层语义, 实体化实验回退): {tn}")
-            continue
-        # 2026-08-26 用户全景缺失检查: 三角内实体化 (原版按 RGB 渲染=Cutoff≈0)
         res = tex_paths.get(tn)
         p = res_to_fs(args.out, res) if res else None
         if not p or not os.path.exists(p):
@@ -853,20 +775,9 @@ def repair_uv_alpha(args, tex_paths):
         flat_avg = np.repeat(np.repeat(blk_mean, 8, 0), 8, 1)
         flat_std = np.repeat(np.repeat(blk_std, 8, 0), 8, 1)
         keep_flat = np.zeros((h, w), dtype=bool)
-        # 2026-08-26: Floor/Ground 类贴图=不透明材质 (原版 blend=0 kw=[] → alpha 被忽略, 按 RGB 渲染)
-        # → keep_flat 误保护地面条带 (亮灰 RGB189 alpha<10 全宽带=原版设计值) = 坑 90 中带暗差来源; 地板贴图全实体化
-        # 2026-08-26 全景: Baked 天空/远景/骷髅区=alpha0+RGB亮=按 RGB 渲染 (原版 Cutoff≈0), 同判据全实体化
-        # 2026-08-26 C 映射(⑧): 'Back  Background' 82% 白全景同判据 (此前名单漏它=注释与实现脱节=全景缺失剩余点);
-        #   注意 'Battle Arena 1 Background' (无 Back)=真 alpha 设计值(天空透光 26.1%a0) → 保留 keep_flat 不豁免
-        _flat_exempt = ('Floor' in p) or ('Ground' in p) or ('Baked' in p) \
-            or ('Back  Background' in p) or ('Back Background' in p)
-        keep_flat[:hh, :ww] = ((flat_avg > 140.0) & (flat_std < 8.0)) \
-            if not _flat_exempt \
-            else np.zeros((hh, ww), dtype=bool)
+        keep_flat[:hh, :ww] = (flat_avg > 140.0) & (flat_std < 8.0)
         # 内容像素=三角内 alpha0 → 实体化 (25<max<=245); 均匀亮块保持透明
-        # 2026-08-26 全景缺失: mx<=245 上界把 RGB 254/255 的纯白内容(天空/骷髅区 82%)排除=元凶
-        # (25 轮防 padding 白块=三角外, 三角 mask 已精确区分) → 三角内 alpha<10 无条件实体化
-        sel = mask & (alpha < 10) & ~keep_flat
+        sel = mask & (alpha < 10) & (mx > 25) & (mx <= 245) & ~keep_flat
         arr[sel, 3] = 255
         Image.fromarray(arr).save(p)
         n_total += int(sel.sum())
@@ -902,39 +813,6 @@ def export_blend_shapes(name, obj, out_dir):
         return None
 
 
-def pad_blacken(args, tex_paths):
-    """padding 翻黑 (2026-08-25 坑89②白斑根治): 稀疏图集 padding=RGB 白+alpha0
-    (原版 URP _ALPHATEST_ON 裁掉/白板材质 RGB0.2 黑不可见) — 导出后直出材质 (UNSHADED) 下
-    若 UV 越界采样到 padding 会白块爆炸 → 全贴图 alpha<10 且 RGB 近白 texel 置黑 (内容区不受影响)"""
-    from PIL import Image
-    import numpy as np
-    n = 0
-    for tn, res in tex_paths.items():
-        p = res_to_fs(args.out, res) if res else None
-        if not p or not os.path.exists(p):
-            continue
-        try:
-            im = Image.open(p).convert('RGBA')
-        except Exception:
-            continue
-        arr = np.array(im)
-        if arr.shape[2] != 4:
-            continue
-        al = arr[:, :, 3]
-        mx = arr[:, :, :3].max(axis=2)
-        sel = (al < 10) & (mx > 200)
-        if not sel.any():
-            continue
-        arr[sel, 0] = 0
-        arr[sel, 1] = 0
-        arr[sel, 2] = 0
-        Image.fromarray(arr).save(p)
-        n += int(sel.sum())
-        print('[pad_black] %s: %d px' % (tn, int(sel.sum())))
-    print('✓ padding 翻黑: %d 像素' % n)
-    return n
-
-
 def clip_curves(arena_dir, clip):
     """AnimationClip JSON → 动画曲线 (clip17: blendShape 权重)"""
     fp = os.path.join(arena_dir, 'AnimationClip', 'AnimationClip_%s.json' % clip)
@@ -953,37 +831,11 @@ def clip_curves(arena_dir, clip):
 
 
 def clip16_curves(arena_dir):
-    """Camera Intro: m_EulerCurves + m_PositionCurves (局部坐标, 2.5s Once)
-    2026-08-26 E 映射: clip 编号各场不同 (battlearena1=AnimationClip_19/黑军团=16) → 按 m_Name 含 'Camera Intro' 匹配;
-    注意 battlearena1 无 AnimationClip_16.json (阈值检查以目录扫描为准)"""
-    adir = os.path.join(arena_dir, 'AnimationClip')
-    if not os.path.isdir(adir):
+    """Camera Intro: m_EulerCurves + m_PositionCurves (局部坐标, 2.5s Once)"""
+    fp = os.path.join(arena_dir, 'AnimationClip', 'AnimationClip_16.json')
+    if not os.path.exists(fp):
         return None
-    files = [f for f in os.listdir(adir) if f.endswith('.json')
-             and len(f[:-5].split('_')) <= 2]  # 排除副本 (=<名>_<pid>.json 三段)
-    fname = None
-    for f in sorted(files):
-        if not f.endswith('.json') or '.json.' in f or f.endswith('_16.json'):
-            continue
-        try:
-            dd = json.load(open(os.path.join(arena_dir, 'AnimationClip', f), encoding='utf-8'))
-        except Exception:
-            continue
-        if not isinstance(dd, dict):
-            continue
-        nm = str(dd.get('m_Name', ''))
-        if 'Camera Intro' in nm and 'Intro' in nm:
-            fname = f
-            break
-    if fname is None:
-        # 变体导出无 m_Name? (UnityPy bundle 直读路径) — 尝试顺序: 19/20 (b1), 16 (黑军团), 任意含 intro 名
-        for f in sorted(files):
-            if f.endswith('.json') and not f.endswith('_16.json') and f.endswith(('_18.json', '_19.json', '_20.json')):
-                fname = f
-                break
-    if fname is None:
-        return None
-    d = json.load(open(os.path.join(arena_dir, 'AnimationClip', fname), encoding='utf-8'))
+    d = json.load(open(fp, encoding='utf-8'))
 
     def pick(sec):
         for item in d.get(sec, []) or []:
@@ -991,89 +843,7 @@ def clip16_curves(arena_dir):
             if ks:
                 return [{'t': float(k.get('time', 0)), 'v': k.get('value')} for k in ks]
         return None
-
-    def pick_axes(sec):
-        """Euler/Position 分通道曲线 (attribute=localEulerAnglesRaw.x 等) → 按轴合并到统一时间轴"""
-        out = {}
-        for item in d.get(sec, []) or []:
-            at = str(item.get('attribute', ''))
-            ks = ((item.get('curve') or {}).get('m_Curve', [])) or []
-            if not ks:
-                continue
-            axis = None
-            for a in ('x', 'y', 'z'):
-                if at.endswith('.' + a):
-                    axis = a
-                    break
-            if axis is None:
-                continue
-            out.setdefault(axis, []).extend(
-                {'t': float(k.get('time', 0)), 'v': float(k.get('value', 0) or 0)} for k in ks)
-        for axis in out:
-            out[axis].sort(key=lambda kv: kv['t'])
-        return out if out else None
-
-    pos_axes = pick_axes('m_PositionCurves')
-    rot = pick_axes('m_EulerCurves')
-    if pos_axes is None and rot is None:
-        return {'pos': pick('m_PositionCurves'), 'rot': pick('m_EulerCurves')}
-    return {'pos': pos_axes, 'rot': rot}
-
-
-def clip16_samples(c16, n=25, dur=2.5):
-    """c16 (clip16_curves 输出, pos/rot 均可为 分轴dict 或 list) → (pos_samples[(x,y,z)...], rot_samples[(x,y,z)...])
-    以 n 等分线性插值 (Unity 曲线近似; slope/Hermite 保形后补)。rot 值=度 (m_EulerCurves) → 直接 rotation_degrees"""
-    def axes_of(sec):
-        if sec is None:
-            return None
-        if isinstance(sec, dict):
-            ax = {}
-            for axis in ('x', 'y', 'z'):
-                keys = sec.get(axis) or []
-                if keys:
-                    ax[axis] = [(float(k['t']), float(k.get('v', 0) or 0)) for k in keys]
-            return ax or None
-        # 旧格式 list: [{t, v:{x,y,z}}] 或 [{t, v:标量}]
-        ax = {}
-        for k in sec:
-            v = k.get('v')
-            if isinstance(v, dict):
-                for axis in ('x', 'y', 'z'):
-                    ax.setdefault(axis, []).append((float(k['t']), float(v.get(axis, 0) or 0)))
-            else:
-                ax.setdefault('x', []).append((float(k['t']), float(v or 0)))
-        return ax or None
-
-    def sample(keys, t):
-        """单轴 keys [(t,v)...] 线性插值 (keys=None→0.0)"""
-        if not keys:
-            return 0.0
-        if t <= keys[0][0]:
-            return keys[0][1]
-        if t >= keys[-1][0]:
-            return keys[-1][1]
-        for i in range(len(keys) - 1):
-            t0, v0 = keys[i]
-            t1, v1 = keys[i + 1]
-            if t0 <= t <= t1:
-                if t1 == t0:
-                    return v1
-                return v0 + (v1 - v0) * (t - t0) / (t1 - t0)
-        return keys[-1][1]
-
-    pos_ax = axes_of(c16.get('pos'))
-    rot_ax = axes_of(c16.get('rot'))
-    pos_s = []
-    rot_s = []
-    for i in range(n + 1):
-        t = dur * i / n
-        pos_s.append(tuple(
-            sample(pos_ax.get(a) if pos_ax and isinstance(pos_ax, dict) and a in pos_ax else None, t)
-            for a in ('x', 'y', 'z')))
-        rot_s.append(tuple(
-            sample(rot_ax.get(a) if rot_ax and isinstance(rot_ax, dict) and a in rot_ax else None, t)
-            for a in ('x', 'y', 'z')))
-    return pos_s, rot_s
+    return {'pos': pick('m_PositionCurves'), 'rot': pick('m_EulerCurves')}
 
 
 # ---------------------------------------------------------------- GDScript 写器
@@ -1116,7 +886,46 @@ void fragment() {
 '''
 
 
-# mat_gd() 死函数已删 (2026-08-26: 无调用者+同款 ShaderMaterial cull 错误)
+def mat_gd(w, var, mi, tex_paths):
+    """生成 StandardMaterial3D 代码, 返回变量名; _SecondaryTex 双贴图材质 → UV scroll ShaderMaterial"""
+    if mi.tex_name2 and mi.tex_name2 in tex_paths:
+        # 双贴图 (Runes "Unlit UV scroll"): shader 双层 + TIME 滚动
+        w.line('var %s := ShaderMaterial.new()' % var)
+        w.line('%s.shader = load("res://assets/uv_scroll.gdshader")' % var)
+        w.line('%s.set_shader_parameter("main_tex", load(%r))' % (var, tex_paths[mi.tex_name]))
+        w.line('%s.set_shader_parameter("secondary_tex", load(%r))' % (var, tex_paths[mi.tex_name2]))
+        v4 = mi.vector4_1 or {}
+        sc = (float(v4.get('r', 1.0) or 1.0), float(v4.get('g', 1.0) or 1.0),
+              float(v4.get('b', 0.0) or 0.0), float(v4.get('a', 0.0) or 0.0))
+        w.line('%s.set_shader_parameter("uv_scroll", Vector4(%.3f, %.3f, %.3f, %.3f))' % (var, *sc))
+        op = 1.0  # _Layers_Blend_Opacity (黑军团 UV Scroll Runes=1.0)
+        w.line('%s.set_shader_parameter("layers_blend_opacity", %.2f)' % (var, op))
+        if mi.cull == 0:
+            w.line('%s.cull_mode = BaseMaterial3D.CULL_DISABLED' % var)
+        return var
+    w.line('var %s := StandardMaterial3D.new()' % var)
+    if mi.tex_name and mi.tex_name in tex_paths:
+        w.line('%s.albedo_texture = load(%r)' % (var, tex_paths[mi.tex_name]))
+    if mi.base_color:
+        w.line('%s.albedo_color = %s' % (var, col_str(mi.base_color)))
+    if mi.is_transparent():
+        w.line('%s.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA' % var)
+        if mi.zwrite <= 0:
+            w.line('%s.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED' % var)
+    if mi.blend >= 2:
+        w.line('%s.blend_mode = BaseMaterial3D.BLEND_MODE_ADD' % var)
+    if mi.cull == 0:
+        w.line('%s.cull_mode = BaseMaterial3D.CULL_DISABLED' % var)
+    elif mi.cull == 1:
+        w.line('%s.cull_mode = BaseMaterial3D.CULL_FRONT' % var)
+    if mi.emission_color:
+        w.line('%s.emission_enabled = true' % var)
+        w.line('%s.emission_energy_multiplier = %.3f' % (var, mi.emission_energy()))
+    w.line('%s.roughness = 0.9' % var)
+    # 引擎差异校准: URP 材质在 Godot 的 specular 高光在原版渲染无体现 (暗场景锐边白弧),
+    # 关闭镜面 — 原版视觉=图集固有色为主 (2026-08-22 二十轮)
+    w.line('%s.specular_mode = BaseMaterial3D.SPECULAR_DISABLED' % var)
+    return var
 
 
 # 原版 Battle Arena 4 PostProcessing 按说明文件 (原始 Unity JSON) 复刻:
@@ -1248,11 +1057,11 @@ def resolve_lut_res(args, a):
                         os.makedirs(os.path.dirname(lp), exist_ok=True)
                         limg.save(lp + '.tmp', format='PNG')
                         lp = dedupe_file(lp, lp + '.tmp', args.arena)
-                    return RESP + 'textures/' + os.path.basename(lp)
+                    return 'res://assets/textures/' + os.path.basename(lp)
         except Exception:
             pass
     if os.path.exists(os.path.join(args.out, 'assets', 'textures', 'LUT Normal.png')):
-        return RESP + 'textures/LUT Normal.png'
+        return 'res://assets/textures/LUT Normal.png'
     return None
 
 
@@ -1508,7 +1317,7 @@ def emit_gltf(args, a, all_nodes, mesh_paths, tex_paths, white_paths):
         w.line('\t_build()')
         w.line('')
         w.line('func _build() -> void:')
-        w.line('\tvar scene: Node3D = load(%r).instantiate()' % (RESP + 'meshes/' +
+        w.line('\tvar scene: Node3D = load(%r).instantiate()' % ('res://assets/meshes/' +
               os.path.basename(gltf_p)))
         # clip17 autoplay 必须在 add_child 之前设置 (AnimationPlayer 入树时读取 autoplay)
         w.line('\tvar _ap: AnimationPlayer = scene.find_child("AnimationPlayer", true, false)')
@@ -1565,7 +1374,7 @@ def emit_gltf(args, a, all_nodes, mesh_paths, tex_paths, white_paths):
             w.line('\tif %s:' % lvn)
             w.line('\t\t%s.light_energy = %.3f' % (lvn, energy))
             if shadow:
-                w.line('\t\t%s.shadow_enabled = false  # RT 实证: 原版烘焙无实时投影 (2026-08-25)' % lvn)
+                w.line('\t\t%s.shadow_enabled = true' % lvn)
         # 相机: 唯一 3D 相机 → current
         cam_name = cam_info['name'] or 'BoardCamera'
         w.line('')
@@ -1694,30 +1503,16 @@ def main() -> int:
                     help='方向光能量校准系数 (引擎差异: Unity SH 全阶+URP 直通 vs Godot 平场; 黑军团 1.1=参考亮度匹配 2026-08-23)')
     ap.add_argument('--ambient-energy', type=float, default=1.15,
                     help='环境光能量校准 (Unity 直通过曝, 引擎物理等效)')
-    ap.add_argument('--unshaded-bake', action='store_true',
-                    help='坑86b 实验: Baked 烘焙纹理材质用 SHADING_MODE_UNSHADED (贴图直出)')
-    ap.add_argument('--pad-black', action='store_true',
-                    help='坑89②: padding 翻黑 (alpha<10 且 RGB 近白 → 黑; 直出材质白斑根治)')
-    ap.add_argument('--res-prefix', default='',
-                    help='资源 res:// 前缀子目录 (12 变体用 assets/arenas/<arena>)')
-    ap.add_argument('--unshaded-gain', type=float, default=1.0,
-                    help='UNSHADED 材质全局 albedo 增益 (原版≈贴图×URP后处理≈0.82)')
     ap.add_argument('--no-lensshift', action='store_true',
                     help='跳过 LensShift→pitch 补偿 (pitch 方向实验未定, 回退用)')
-    ap.add_argument('--lensshift-deg', type=float, default=None,
-                    help='直接指定 LensShift 补偿俯角 (度, 负数=俯视; 覆盖公式 — 坑89 矩阵定案用)')
     ap.add_argument('--no-mirror', action='store_true',
                     help='试验: 内容直挂 Unity 世界系+相机仅 Y180 (2026-08-23 弧线朝外=错, 仅试验)')
     ap.add_argument('--mirror', action='store_true',
                     help='试验: MirrorX X 镜像 (2026-08-23 弧线朝外=错, 仅试验; 默认=Z 反射=定案)')
-    ap.add_argument('--flip-tex', action='store_true', default=False,
-                    help='场景 mesh 贴图水平翻转 (2026-08-26 曾为修复; 根因实锤=UnityPy OBJ 导出 x 取负'
-                         '→ fix_obj_xmirror 正解已修, 默认 False; 保留作对照)')
     ap.add_argument('--fmt', default='gd', choices=['gd', 'gltf'],
                     help="gd=GDScript 场景脚本 (默认); gltf=场景级 glTF 原生导入 (方案A: "
                          "Mesh+材质+贴图+相机/灯+手性一次性导出, 无负 scale)")
     args = ap.parse_args()
-    RESP = 'res://assets/' + (args.res_prefix + '/' if args.res_prefix else '')
     skips = [s.strip() for s in args.skip.split(',') if s.strip()]
 
     a = Assembler(args.arena, args.out)
@@ -1773,7 +1568,6 @@ def main() -> int:
                 with open(tmp, 'w', encoding='utf-8', errors='replace') as f:
                     f.write(raw)
                 fix_obj_normals(tmp)
-                fix_obj_xmirror(tmp)
                 p = dedupe_file(p, tmp, args.arena)
                 imp = p + '.import'
                 if os.path.exists(imp):
@@ -1786,7 +1580,7 @@ def main() -> int:
             imp = p + '.import'
             if os.path.exists(imp):
                 os.remove(imp)
-        res = RESP + 'meshes/' + os.path.basename(p)
+        res = 'res://assets/meshes/' + os.path.basename(p)
         mesh_paths[name] = res
         # 形态键网格 → blendshapes.json (clip17 链甩鞭动画数据源)
         if obj is not None and name not in BS_FILES:
@@ -1823,7 +1617,7 @@ def main() -> int:
             else:
                 print('  [贴图导出失败] %s' % tn)
                 return None
-        res = RESP + 'textures/' + os.path.basename(p)
+        res = 'res://assets/textures/' + os.path.basename(p)
         tex_paths[tn] = res
         return res
 
@@ -1885,7 +1679,7 @@ def main() -> int:
                         wp = os.path.join(os.path.dirname(fp), 'white_' + os.path.basename(fp))
                         make_white_tex(fp, wp)
                         if os.path.exists(wp):
-                            white_paths[mi.tex_name] = RESP + 'textures/' + os.path.basename(wp)
+                            white_paths[mi.tex_name] = 'res://assets/textures/' + os.path.basename(wp)
                 payload = (ps, render_mode, mref, mats)
                 # renderMode=4 (Mesh): 粒子用网格 draw pass (Light Shaft Plane1x1 等)
                 if render_mode == 4 and mref and mref.get('m_PathID'):
@@ -1901,10 +1695,6 @@ def main() -> int:
             kind = 'camera'
         elif a.has_comp(gopid, a.LIG):
             kind = 'light'
-        elif a.has_comp(gopid, a.LNR):
-            # 2026-08-26 全盘对账 E-1: LineRenderer (Smoke Column×6 烟柱/CrosshairLine) → ribbon mesh
-            kind = 'line'
-            payload = next((a.LNR[c] for c in a.go_comps[gopid] if c in a.LNR), None)
         all_nodes.append((kind, tpid, gopid, nm, payload, parent_tpid))
         for c in a.children_of(tpid):
             collect(c, tpid)
@@ -1920,10 +1710,6 @@ def main() -> int:
     if args.fmt == 'gltf':
         emit_gltf(args, a, all_nodes, mesh_paths, tex_paths, white_paths)
         nfix = repair_uv_alpha(args, tex_paths)
-        if args.pad_black:
-            pad_blacken(args, tex_paths)
-        if args.pad_black:
-            pad_blacken(args, tex_paths)
         if nfix:
             print('✓ alpha 修复: %d 像素 (网格 UV 区内暗内容实体化)' % nfix)
         return 0
@@ -1945,24 +1731,6 @@ def main() -> int:
             repr(mesh_paths[k]) for k in sorted(mesh_paths)))
         w.line('const TEX_PATHS: Array[String] = [%s]' % ', '.join(
             repr(tex_paths[k]) for k in sorted(tex_paths)))
-        w.line('')
-        # 2026-08-26 用户贴图朝向翻转实锤: 贴图内容水平镜像(图案箭头西南→东南, 位置不变) —
-        # 翻转源在贴图→渲染链路 → 加载后水平翻转 = 修复 (与用户对照实验 C 版一致)
-        # 注意: ShaderMaterial(uv_scroll/LUT) 不走此函数 (其内部纹理坐标由 shader 处理)
-        w.line('var _flip_tex_cache: Dictionary = {}')
-        w.line('')
-        w.line('func _flip_tex(src: Texture2D) -> Texture2D:')
-        w.line('\tif src == null:')
-        w.line('\t\treturn null')
-        w.line('\tif _flip_tex_cache.has(src):')
-        w.line('\t\treturn _flip_tex_cache[src]')
-        w.line('\tvar img := src.get_image()')
-        w.line('\tif img == null:')
-        w.line('\t\treturn src')
-        w.line('\timg.flip_x()')
-        w.line('\tvar tex := ImageTexture.create_from_image(img)')
-        w.line('\t_flip_tex_cache[src] = tex')
-        w.line('\treturn tex')
         w.line('')
         w.line('func _ready() -> void:')
         w.line('\t_build()')
@@ -2050,75 +1818,30 @@ def main() -> int:
                       float(v4.get('b', 0.0) or 0.0), float(v4.get('a', 0.0) or 0.0))
                 lines.append('%s.set_shader_parameter("uv_scroll", Vector4(%.3f, %.3f, %.3f, %.3f))' % (mv, *sc))
                 lines.append('%s.set_shader_parameter("layers_blend_opacity", 1.00)' % mv)
-                # 2026-08-26 删: ShaderMaterial 无 cull_mode (BaseMaterial3D 专属) — b3 'Plane' Texture Baked UV scroll 2
-                # (cull=0) 曾致 _ready 报错相机未建=黑屏; 双面由 uv_scroll shader 内 render_mode cull_disabled 处理
+                if mi.cull == 0:
+                    lines.append('%s.cull_mode = BaseMaterial3D.CULL_DISABLED' % mv)
                 return lines
             if not (mi.tex_name and mi.tex_name in tex_paths):
                 return None
             lines = ['var %s := StandardMaterial3D.new()' % mv]
-            if args.flip_tex:
-                # 2026-08-26 用户贴图朝向翻转实锤: 贴图内容水平镜像(箭头西南→东南), 位置不变
-                # → 场景 mesh 贴图加载后水平翻转 = 修复 (粒子/精灵贴图方向性弱, 不翻)
-                lines.append('%s.albedo_texture = _flip_tex(load(%r))' % (mv, tex_paths[mi.tex_name]))
-            else:
-                lines.append('%s.albedo_texture = load(%r)' % (mv, tex_paths[mi.tex_name]))
+            lines.append('%s.albedo_texture = load(%r)' % (mv, tex_paths[mi.tex_name]))
             if mi.base_color:
                 lines.append('%s.albedo_color = ' % mv + col_str(mi.base_color))
-            if "_ALPHATEST_ON" in mi.keywords or (mi.alpha_clip is not None and mi.alpha_clip > 0.0 and (mi.surface or 0) == 0):
-                # 原版 URP TransparentCutout: 烘焙图集=多层 alpha-cut (裁 padding → 底地板透出)
-                # 2026-08-25 坑89③ 构图定案: scissor 是构图必要项 (_Blend=0 → 门控独立于 is_transparent)
-                # 2026-08-26 B 映射: cutoff 用 _ClipThreshold/_Cutoff 真实值 (38 个非 0.5 不再硬编码)
-                lines.append('%s.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR' % mv)
-                lines.append('%s.alpha_scissor_threshold = %.4f' % (mv, mi.cutoff if mi.cutoff is not None else 0.5))
-            elif mi.is_transparent():
+            if mi.is_transparent():
                 lines.append('%s.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA' % mv)
                 if mi.zwrite <= 0:
                     lines.append('%s.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED' % mv)
-            # 2026-08-26 B 映射表: blend 四元组 (_Surface,_SrcBlend,_DstBlend,_AlphaClip):
-            # URP _Blend 0=Alpha 1=Premultiply 2=Additive 3=Multiply — 与 (src,dst) 交叉验证
-            if mi.blend == 3 or (mi.dst_blend == 0 and mi.src_blend == 2):
-                lines.append('%s.blend_mode = BaseMaterial3D.BLEND_MODE_MUL' % mv)
-            elif mi.blend == 1 or (mi.src_blend == 1 and mi.dst_blend == 10):
-                lines.append('%s.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA' % mv)
-                lines.append('%s.blend_mode = BaseMaterial3D.BLEND_MODE_PREMULT_ALPHA' % mv)
-            elif mi.blend == 2 or (mi.src_blend == 5 and mi.dst_blend == 1):
-                lines.append('%s.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA' % mv)
+            if mi.blend >= 2:
                 lines.append('%s.blend_mode = BaseMaterial3D.BLEND_MODE_ADD' % mv)
             if mi.cull == 0:
                 lines.append('%s.cull_mode = BaseMaterial3D.CULL_DISABLED' % mv)
             elif mi.cull == 1:
                 lines.append('%s.cull_mode = BaseMaterial3D.CULL_FRONT' % mv)
-            if mi.emission_color and '_EMISSION' in mi.keywords:
-                # 2026-08-26 B 映射: 补 emission 颜色 (此前只设 enabled+energy=黑发射) + _EmissionMap 贴图
-                # 门控=ValidKeywords 含 _EMISSION (Fence/Floor 的 _EmissionColor 在 m_InvalidKeywords=原版不发光)
+            if mi.emission_color:
                 lines.append('%s.emission_enabled = true' % mv)
-                lines.append('%s.emission = ' % mv + col_str(mi.emission_color))
                 lines.append('%s.emission_energy_multiplier = %.3f' % (mv, mi.emission_energy()))
-            if mi.tex_scale is not None and mi.tex_offset is not None:
-                lines.append('%s.uv1_scale = Vector3(%.4f, %.4f, 1.0)' % (mv, mi.tex_scale[0], mi.tex_scale[1]))
-                lines.append('%s.uv1_offset = Vector3(%.4f, %.4f, 0.0)' % (mv, mi.tex_offset[0], mi.tex_offset[1]))
-            if mi.queue_offset is not None and abs(mi.queue_offset) > 0.001:
-                lines.append('%s.render_priority = %d' % (mv, int(round(mi.queue_offset))))
-            if args.unshaded_bake and mi.tex_name and not mi.is_transparent():
-                # 坑86b 实验 (2026-08-25): 场景贴图=烘焙产物自带光照, UNSHADED=直出 (对照原版 RT 亮度; 透明 FX 除外);
-                # 原版=贴图×URP 后处理(LUT identity+bloom)≈×0.82 → --unshaded-gain 全局压暗
-                lines.append('%s.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED' % mv)
-                if abs(args.unshaded_gain - 1.0) > 1e-6:
-                    lines.append('%s.albedo_color *= %.4f' % (mv, args.unshaded_gain))
-            # 2026-08-26 B 映射: roughness=1-_Smoothness (真实值替代硬编码 0.9); 金属/非烘焙材质保留高光
-            var_rough = mi.roughness()
-            if var_rough is not None:
-                lines.append('%s.roughness = %.4f' % (mv, var_rough))
-            else:
-                lines.append('%s.roughness = 0.9' % mv)
-            lit = not (args.unshaded_bake and mi.tex_name and not mi.is_transparent())
-            if lit:
-                # 金属材质 (_Metallic>0, 21 个: Card 3d WH40K/ShellCasing/Water_Splatter) 保留 PBR
-                lines.append('%s.specular_mode = BaseMaterial3D.SPECULAR_SCHLICK_GGX' % mv)
-                if mi.metallic is not None and mi.metallic > 0.0:
-                    lines.append('%s.metallic = %.4f' % (mv, float(mi.metallic)))
-            else:
-                lines.append('%s.specular_mode = BaseMaterial3D.SPECULAR_DISABLED' % mv)
+            lines.append('%s.roughness = 0.9' % mv)
+            lines.append('%s.specular_mode = BaseMaterial3D.SPECULAR_DISABLED' % mv)
             return lines
 
         bg_color = None  # 3D 相机 (BoardCamera) 的 m_BackGroundColor, 供环境背景用
@@ -2156,7 +1879,7 @@ def main() -> int:
                     export_morph_gltf(gltf_p, mesh_paths[payload].replace('res://', args.out + '/'), bsdata, rel,
                                       alpha_blend=mi.is_transparent() if mi else True,
                                       double_sided=a.has_smr(gopid), anim=anim)
-                    gltf_res = RESP + 'meshes/' + os.path.basename(gltf_p)
+                    gltf_res = 'res://assets/meshes/' + os.path.basename(gltf_p)
                     w.line('\tvar %s: Node3D' % nv)
                     w.line('\t%s = load(%r).instantiate()' % (nv, gltf_res))
                     w.line('\t%s.name = %r' % (nv, nm))
@@ -2179,90 +1902,6 @@ def main() -> int:
                 continue
             elif kind == 'particle':
                 emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_ref(parent_tpid), white_paths)
-                continue
-            elif kind == 'line':
-                # 2026-08-26 全盘对账 E-1: LineRenderer → ribbon mesh (Smoke Column×6 烟柱 z=0 局部折线,
-                # widthMultiplier×widthCurve(归一); 面向相机的 ±Z 纸带; CrosshairLine 同类)
-                lnr = payload or {}
-                params = lnr.get('m_Parameters', {}) or {}
-                wm = float(params.get('widthMultiplier', 1.0) or 1.0)
-                wkeys = ((params.get('widthCurve', {}) or {}).get('m_Curve', [])) or []
-                pts = lnr.get('m_Positions', []) or []
-                if not pts:
-                    continue
-                n_pts = len(pts)
-                seg = [0.0] * n_pts
-                total = 0.0
-                for i in range(1, n_pts):
-                    dx = float(pts[i]['x']) - float(pts[i - 1]['x'])
-                    dy = float(pts[i]['y']) - float(pts[i - 1]['y'])
-                    dz = float(pts[i]['z']) - float(pts[i - 1]['z'])
-                    total += (dx * dx + dy * dy + dz * dz) ** 0.5
-                    seg[i] = total
-                tw = max(total, 1e-6)
-
-                def lw_at(tn):
-                    if not wkeys:
-                        return wm
-                    if tn <= wkeys[0].get('time', 0.0):
-                        v = wkeys[0].get('value', 1.0)
-                    elif tn >= wkeys[-1].get('time', 1.0):
-                        v = wkeys[-1].get('value', 1.0)
-                    else:
-                        v = wkeys[-1].get('value', 1.0)
-                        for i in range(len(wkeys) - 1):
-                            t0 = float(wkeys[i].get('time', 0.0) or 0.0)
-                            v0 = float(wkeys[i].get('value', 1.0) or 1.0)
-                            t1 = float(wkeys[i + 1].get('time', 1.0) or 1.0)
-                            v1 = float(wkeys[i + 1].get('value', 1.0) or 1.0)
-                            if t0 <= tn <= t1:
-                                v = v0 + (v1 - v0) * (tn - t0) / (t1 - t0) if t1 > t0 else v1
-                                break
-                    return max(0.0, min(1.0, float(v))) * wm
-
-                w.line('\tvar %s := MeshInstance3D.new()' % nv)
-                w.line('\t%s.name = %r' % (nv, nm))
-                imv = w.next_id('im')
-                w.line('\tvar %s := ImmediateMesh.new()' % imv)
-                w.line('\t%s.surface_begin(Mesh.PRIMITIVE_TRIANGLES)' % imv)
-                for i in range(n_pts - 1):
-                    p0 = pts[i]
-                    p1 = pts[i + 1]
-                    w0 = lw_at(seg[i] / tw) / 2.0
-                    w1 = lw_at(seg[i + 1] / tw) / 2.0
-                    x0, y0, z0 = float(p0['x']), float(p0['y']), float(p0['z'])
-                    x1, y1, z1 = float(p1['x']), float(p1['y']), float(p1['z'])
-                    # 两个三角 (0-,0+,1+) (0-,1+,1-); 法线 ±z
-                    w.line('\t%s.surface_add_vertex(Vector3(%.4f, %.4f, %.4f))' % (imv, x0, y0, z0 - w0))
-                    w.line('\t%s.surface_add_vertex(Vector3(%.4f, %.4f, %.4f))' % (imv, x0, y0, z0 + w0))
-                    w.line('\t%s.surface_add_vertex(Vector3(%.4f, %.4f, %.4f))' % (imv, x1, y1, z1 + w1))
-                    w.line('\t%s.surface_add_vertex(Vector3(%.4f, %.4f, %.4f))' % (imv, x0, y0, z0 - w0))
-                    w.line('\t%s.surface_add_vertex(Vector3(%.4f, %.4f, %.4f))' % (imv, x1, y1, z1 + w1))
-                    w.line('\t%s.surface_add_vertex(Vector3(%.4f, %.4f, %.4f))' % (imv, x1, y1, z1 - w1))
-                w.line('\t%s.surface_end()' % imv)
-                w.line('\t%s.mesh = %s' % (nv, imv))
-                mats = a.mats_of(gopid)
-                mi = mats[0] if mats else None
-                if mi is not None and mi.tex_name and mi.tex_name not in tex_paths:
-                    ensure_tex(mi)
-                nv2 = w.next_id('m')
-                ml = emit_mat(mi, nv2) if mi is not None else None
-                if ml:
-                    for l in ml:
-                        w.line('\t' + l)
-                    w.line('\t%s.material_override = %s' % (nv, nv2))
-                else:
-                    # 2026-08-26: 烟柱材质贴图在解包缺失 (别 bundle) → Smoke5.png 近似 (半透明灰烟)
-                    w.line('\tvar %s := StandardMaterial3D.new()' % nv2)
-                    w.line('\t%s.albedo_texture = load("res://assets/textures/Smoke5.png")' % nv2)
-                    w.line('\t%s.albedo_color = Color(0.9, 0.9, 0.92, 0.55)' % nv2)
-                    w.line('\t%s.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA' % nv2)
-                    w.line('\t%s.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED' % nv2)
-                    w.line('\t%s.cull_mode = BaseMaterial3D.CULL_DISABLED' % nv2)
-                    w.line('\t%s.material_override = %s' % (nv, nv2))
-                emit_local(nv, tpid)
-                w.line('\t%s.add_child(%s)' % (parent_ref(parent_tpid), nv))
-                w.line('')
                 continue
             elif kind == 'camera':
                 cd = next(a.CAM[c] for c in a.go_comps[gopid] if c in a.CAM)
@@ -2293,25 +1932,20 @@ def main() -> int:
                 # Cinemachine m_Lens.LensShift.y → 相机 pitch 补偿 (2026-08-23 修正:
                 # 旧实现 frustum_offset 仅 PROJECTION_FRUSTUM 生效 → 默认 PERSPECTIVE 下 LensShift 从未生效
                 # = 画面 gate 偏移缺失 → 地平面偏低/"近了/看不全" 根因之一。
-                # LensShift=视口归一化 gate 偏移 (y-0.205=gate 下移) → 等效相机俯角 atan(y*tan(fov/2))
-                # 2026-08-25 夜投影校准 (坑89): 地面地标序列 0°→484 / +5.02°→592(目标 586) 单调 →
-                # 真值 = **+4.74° (上仰)**; 08-23 原公式符号即正确 (lsy=-0.205 → +5.02);
-                # 上午"翻转"两次均为误 (测量受光照态干扰) — 勿再动符号
+                # LensShift=视口归一化 gate 偏移 (y-0.205=gate 下移) → 等效相机抬头角 atan(y*tan(fov/2))
                 _fov_v = cd.get('field of view') or 46.397
                 lsy = cd.get('m_LensShift', {}).get('y') or 0.0
                 if lsy and not args.no_lensshift:
                     import math as _m
-                    if args.lensshift_deg is not None:
-                        # 矩阵定案用: 直接指定俯角度数 (覆盖公式; 负=俯视, 正=上仰)
-                        _theta = _m.radians(args.lensshift_deg)
-                    else:
-                        _theta = _m.atan(lsy * _m.tan(_m.radians(_fov_v) / 2.0))
+                    _theta = _m.atan(lsy * _m.tan(_m.radians(_fov_v) / 2.0))
                     _rt = _m.cos(_theta / 2.0)
                     _rs = _m.sin(_theta / 2.0)
-                    # 绕本地 X 旋转后乘
+                    # 绕本地 X 旋转: gate 下移=等效俯视(参考图地平面更宽/更俯视, 2026-08-23 vision 实测符号);
+                    # RotX(+theta) 后乘
                     qq = q_mul(qq, (_rs, 0.0, 0.0, _rt))
                     CAM_PITCH[nm] = _m.degrees(_theta)
                     print('  [camera] LensShift y=%.3f → pitch %+.2f°' % (lsy, CAM_PITCH[nm]))
+                    print('  [camera] LensShift y=%.3f → pitch %+.2f°' % (lsy, _m.degrees(_theta)))
                 w.line('\t%s.quaternion = Quaternion(%.6f, %.6f, %.6f, %.6f)' % (nv, qq[0], qq[1], qq[2], qq[3]))
                 w.line('\t%s.scale = Vector3(%.6f, %.6f, %.6f)' % (nv, 1.0, 1.0, 1.0))
                 fov = _fov_v
@@ -2332,10 +1966,10 @@ def main() -> int:
                 lt = a.local_trans(tpid)
                 pos, q, sc = (lt[0], lt[1], lt[2]), lt[3], lt[4]
                 w.line('\t%s.position = Vector3(%.4f, %.4f, %.4f)' % (nv, pos[0], pos[1], pos[2]))
-                # 坑85 (2026-08-25): 曾断言旧公式 B = R ⊗ Rx(-90) "结果=光向上(照天)" 并把 q_light_godot 定为正解 —
-                # 2026-08-25 重生成 A/B 实测推翻: 旧公式=已校准 98.1/97.5 vs 原版 RT 95.5 ✓;
-                # q_light_godot 新版=全场 35.0 (背光). 恢复旧公式, 勿再改 (校准基准=Unity参照管线 RT 亮度)
-                qg = q_mul(q, (-math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5)))
+                # 坑85 (2026-08-25): 旧公式 B = R ⊗ Rx(-90) 结果=光向上(照天) — 地面全背光(场景暗主因);
+                # 正确: Unity 光方向 = R·(0,-1,0) (默认垂直向下), Godot 目标 = (dx,dy,-dz) Z反射,
+                #   Godot B 使 B·(0,0,-1)=目标 (look_at 逻辑: z=-g, x=up×z, y=z×x)
+                qg = q_light_godot(q)
                 w.line('\t%s.quaternion = Quaternion(%.6f, %.6f, %.6f, %.6f)' % (nv, qg[0], qg[1], qg[2], qg[3]))
                 # 按说明书: Light m_Color(1,1,1) 白光 + m_Intensity 1.0 直通 (此前暖色修正的依据
                 # "原版白光→含 LUT 暖调" 已被推翻: ColorLookup=LUT Normal identity → 无暖调, 颜色零自造)
@@ -2348,7 +1982,7 @@ def main() -> int:
                 w.line('\t%s.light_energy = %.3f' % (nv, float(ld.get('m_Intensity', 1.0) or 1.0) * args.light_energy))
                 sh = ld.get('m_Shadows', {})
                 if sh.get('m_Type', 0) != 0 and ld.get('m_Type') == 1:
-                    w.line('\t%s.shadow_enabled = false  # RT 实证: 原版烘焙无实时投影 (2026-08-25)' % nv)
+                    w.line('\t%s.shadow_enabled = true' % nv)
             else:  # container
                 w.line('\tvar %s := Node3D.new()' % nv)
                 w.line('\t%s.name = %r' % (nv, nm))
@@ -2427,11 +2061,11 @@ def main() -> int:
                                 os.makedirs(os.path.dirname(lp), exist_ok=True)
                                 limg.save(lp + '.tmp', format='PNG')
                                 lp = dedupe_file(lp, lp + '.tmp', args.arena)
-                            lut_res = RESP + 'textures/' + os.path.basename(lp)
+                            lut_res = 'res://assets/textures/' + os.path.basename(lp)
                 except Exception:
                     lut_res = None
             if lut_res is None and os.path.exists(os.path.join(args.out, 'assets', 'textures', 'LUT Normal.png')):
-                lut_res = RESP + 'textures/LUT Normal.png'  # 回退: LUT Blender 共享默认(黑军团)
+                lut_res = 'res://assets/textures/LUT Normal.png'  # 回退: LUT Blender 共享默认(黑军团)
             if lut_res:
                 w.line('\tpm.set_shader_parameter("lut", load(%r))' % lut_res)
                 w.line('\tpm.set_shader_parameter("lut_contribution", 1.0)')
@@ -2442,40 +2076,42 @@ def main() -> int:
             w.line('\tadd_child(pp)')
             break
 
-        # ---- Camera Intro 接入 (clip16 Once 2.5s 相机入场; 2026-08-26 E 映射: 全键采样+三轴插值) ----
+        # ---- Camera Intro 接入 (clip16 Once 2.5s 相机入场, 20轮续; clip17 链动画已进 GLTF) ----
         c16 = clip16_curves(os.path.join(SCENE_ROOT, args.arena))
         cam_nv = CAM_VARS.get('BoardCamera') or CAM_VARS.get('boardcamera')
         if c16 and c16.get('pos') and cam_nv:
             w.line('')
-            pos_s, rot_s = clip16_samples(c16)
-            gd_pos = []
-            for (px, py, pz) in pos_s:
-                if args.mirror:
-                    gd_pos.append((100.0 - px, py, pz))
-                elif args.no_mirror:
-                    gd_pos.append((100.0 + px, py, pz))
-                else:
-                    gd_pos.append((100.0 + px, py, -pz))
-            w.line('	# ==== Camera Intro (原版 2.5s Once: 镜头推镜+三轴 Euler, 25 采样点=全键保形) ====')
+            pos = c16['pos']
+            p0, p1 = pos[0]['v'], pos[-1]['v']
+            # 三分支坐标换算 (2026-08-23 修复: clip16 曲线必须与相机方案同坐标系, 此前仅 mirror-x 换算):
+            # mirror-x: godot_x = 100 - unity_x; no-mirror: 原样; z 反射(默认): x 原样 + z 取反
+            if args.mirror:
+                p0x, p0y, p0z = 100.0 - p0['x'], p0['y'], p0['z']
+                p1x, p1y, p1z = 100.0 - p1['x'], p1['y'], p1['z']
+            elif args.no_mirror:
+                p0x, p0y, p0z = 100.0 + p0['x'], p0['y'], p0['z']
+                p1x, p1y, p1z = 100.0 + p1['x'], p1['y'], p1['z']
+            else:
+                # z 反射(默认): Unity 局部 x+100(父 BattlePrefab) → z 取反 (原点=世界)
+                p0x, p0y, p0z = 100.0 + p0['x'], p0['y'], -p0['z']
+                p1x, p1y, p1z = 100.0 + p1['x'], p1['y'], -p1['z']
+            rot = c16.get('rot') or []
+            r0x = rot[0]['v']['x'] if rot else 0.0
+            r1x = -CAM_PITCH.get('BoardCamera', 0.0) if CAM_PITCH else (rot[-1]['v']['x'] if rot else 0.0)
+            w.line('	# ==== Camera Intro (原版 clip16, 2.5s Once: 镜头 (3.06,2.64,9.86)进至静态位 + rotX 至 LensShift pitch) ====')
             w.line('	_tgt_cam = %s' % cam_nv)
             w.line('')
             w.line('var _tgt_cam: Camera3D')
             w.line('var _anim_t := 0.0')
-            w.line('var _pos_s: Array = [%s]' % ', '.join('Vector3(%.4f, %.4f, %.4f)' % p for p in gd_pos))
-            w.line('var _rot_s: Array = [%s]' % ', '.join('Vector3(%.4f, %.4f, %.4f)' % p for p in rot_s))
             w.line('')
             w.line('func _process(delta: float) -> void:')
             w.line('	_anim_t += delta')
             w.line('	if _tgt_cam:')
             w.line('		var _it := clampf(_anim_t / 2.5, 0.0, 1.0)')
-            w.line('		var _fi := _it * float(_pos_s.size() - 1)')
-            w.line('		var _a := int(_fi)')
-            w.line('		var _b := mini(_a + 1, _pos_s.size() - 1)')
-            w.line('		var _f := _fi - float(_a)')
-            w.line('		_tgt_cam.position = (_pos_s[_a] as Vector3).lerp(_pos_s[_b] as Vector3, _f)')
-            w.line('		_tgt_cam.rotation_degrees = (_rot_s[_a] as Vector3).lerp(_rot_s[_b] as Vector3, _f)')
+            w.line('		_tgt_cam.position = Vector3(%.4f, %.4f, %.4f).lerp(Vector3(%.4f, %.4f, %.4f), _it)' % (p0x, p0y, p0z, p1x, p1y, p1z))
+            w.line('		_tgt_cam.rotation_degrees.x = lerpf(%.4f, %.4f, _it)' % (r0x, r1x))
             w.line('		if _it >= 1.0:')
-            w.line('			_tgt_cam = null  # intro 结束: 停止每帧写相机')
+            w.line('			_tgt_cam = null  # intro 结束: 停止每帧写相机 (2026-08-23: 此前永不释放, 覆盖 LensShift pitch/外部调整)')
     # 包装 tscn (挂脚本)
     out_tscn = os.path.join(args.out, 'scenes', 'unity_arena_%s.tscn' % args.arena)
     with open(out_tscn, 'w', encoding='utf-8') as f:
@@ -2527,9 +2163,8 @@ def emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_expr='self',
         (em.get('rateOverTime', {}) or {}).get('scalar', 0.0) if isinstance(em.get('rateOverTime', {}), dict) else 0.0)
     _life_min, _life_max = curve_min_max(im.get('startLifetime', {}), 1.0)
     _pool = int(rate_over_time * max(_life_min, _life_max))
-    if _pool > 0 or rate_over_time > 0:
-        # rate>0 但池<1 (如 0.2x4=0.8): 取整到 1 发粒 — 防子节点已收集但本粒子早退=引用未声明变量 (b2 RocketTrail, 2026-08-26)
-        amount = max(1, min(max(_pool, 1), 800))
+    if _pool > 0:
+        amount = max(1, min(_pool, 800))
         _burst_only = False
     else:
         # rate=0 的 burst 类: 用爆发总量, 上限 200 (Skull Eyes 等一次性粒子)
@@ -2662,7 +2297,7 @@ def emit_particle_gd(w, a, nv, tpid, nm, payload, tex_paths, parent_expr='self',
         w.line('\t%s.gradient = %s' % (gt_, gr_))
         w.line('\t%s.color_ramp = %s' % (pmv, gt_))
     if rm.get('enabled'):
-        rz = rm.get('curve', rm.get('z', {}))  # 2026-08-26 D映射: separateAxes=false→curve 键(子代理D实锤)
+        rz = rm.get('z', {})
         rv = None
         if isinstance(rz, dict):
             mc = rz.get('minMaxCurve', rz)
@@ -2763,43 +2398,6 @@ def obj_valid(fp):
     except Exception:
         return False
     return ('\nv ' in head or head.startswith('v ')) and '\nvn ' in head and '\nvt ' in head
-
-
-def fix_obj_xmirror(fp):
-    """UnityPy MeshExporter 导出 OBJ: 顶点 x 取负 + 面绕序反转, 但 UV 不镜像 (2026-08-26 根因实锤,
-    子代理 A 级证据=MeshExporter.py:33/-pos[0]+L54 绕序反) — "Unity 左手→OBJ 右手"不完整转换:
-    几何镜像+绕序反≠外观不变 (缺 UV u 镜像), GO 链又全是 RotX(保持 x̂) → 每个网格绕枢轴水平镜像
-    (用户"位置不变、图案开口翻转"精确匹配); 还原=顶点 x'=-x + 面引用倒序 + 法线 x 还原,
-    与 MirrorZ z 反射组合后=任意 GO 旋转(含旗/炮复合)精确=原版; 修复后无需 --flip-tex"""
-    if os.path.exists(fp + '.xfixed'):
-        return
-    with open(fp, encoding='utf-8', errors='replace') as f:
-        lines = f.readlines()
-    out = []
-    for l in lines:
-        p = l.strip().split()
-        if not p:
-            out.append(l)
-            continue
-        if p[0] == 'v' and len(p) >= 4:
-            try:
-                out.append('v %.9G %.9G %.9G\n' % (-float(p[1]), float(p[2]), float(p[3])))
-            except Exception:
-                out.append(l)
-        elif p[0] == 'vn' and len(p) >= 4:
-            try:
-                out.append('vn %.9G %.9G %.9G\n' % (-float(p[1]), float(p[2]), float(p[3])))
-            except Exception:
-                out.append(l)
-        elif p[0] == 'f' and len(p) >= 4:
-            # UnityPy 写入顺序=f c b a (绕序已反) — 还原=引用倒序排列
-            out.append('f ' + ' '.join(p[3:0:-1]) + '\n')
-        else:
-            out.append(l)
-    with open(fp, 'w', encoding='utf-8', errors='replace') as f:
-        f.writelines(out)
-    with open(fp + '.xfixed', 'w', encoding='utf-8') as f:
-        f.write('1')
 
 
 def fix_obj_normals(fp):

@@ -338,12 +338,12 @@ def main() -> int:
         size_min, size_max = cv_pair(im.get('startSize'), 1)
         life_min, life_max = cv_pair(im.get('startLifetime'), 1)
         shape = {
-            'type': shp.get('shapeType', 0),
+            'type': shp.get('type', shp.get('shapeType', 0)),
             'radius': cv(shp.get('radius'), 1),
             'radiusThickness': cv(shp.get('radiusThickness'), 1),
             'angle': cv(shp.get('angle'), 0),
-            'scale': [cv(shp.get('scale', {}).get('x')), cv(shp.get('scale', {}).get('y')),
-                      cv(shp.get('scale', {}).get('z'))] if isinstance(shp.get('scale'), dict) else [1, 1, 1],
+            'scale': [cv(shp.get('m_Scale', shp.get('scale', {})).get('x')), cv(shp.get('m_Scale', shp.get('scale', {})).get('y')),
+                      cv(shp.get('m_Scale', shp.get('scale', {})).get('z'))] if isinstance(shp.get('m_Scale', shp.get('scale')), dict) else [1, 1, 1],
         }
         vel = {}
         if vm.get('enabled'):

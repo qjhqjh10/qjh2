@@ -385,12 +385,12 @@ def convert_effect(go_name, as3d=False, as_name=None):
         offset, escale = load_go_transform(comps)
         shp = ps.get('ShapeModule', {})
         shape = {
-            'type': shp.get('shapeType', 0),
+            'type': shp.get('type', shp.get('shapeType', 0)),
             'radius': cv(shp.get('radius'), 1),
             'radiusThickness': cv(shp.get('radiusThickness'), 1),
             'angle': cv(shp.get('angle'), 0),
-            'scale': [cv(shp.get('scale', {}).get('x'), 1), cv(shp.get('scale', {}).get('y'), 1),
-                      cv(shp.get('scale', {}).get('z'), 1)] if isinstance(shp.get('scale'), dict) else [1, 1, 1],
+            'scale': [cv(shp.get('m_Scale', shp.get('scale', {})).get('x'), 1), cv(shp.get('m_Scale', shp.get('scale', {})).get('y'), 1),
+                      cv(shp.get('m_Scale', shp.get('scale', {})).get('z'), 1)] if isinstance(shp.get('m_Scale', shp.get('scale')), dict) else [1, 1, 1],
         }
         life = cv(im.get('startLifetime')) or 1.0
         sz = cv(im.get('startSize')) or 1.0
@@ -440,7 +440,7 @@ def convert_effect(go_name, as3d=False, as_name=None):
             "color_max": [sc.get('maxColor', {}).get(k, 1.0) for k in 'rgba'] if sc.get('maxColor') else [1, 1, 1, 1],
             "emission_rate": cv(em.get('rateOverTime')) or 0.0,
             "bursts": bursts,
-            "shape_type": ps.get('ShapeModule', {}).get('shapeType'),
+            "shape_type": ps.get('ShapeModule', {}).get('type', ps.get('ShapeModule', {}).get('shapeType')),
             "render_mode": render_mode,
             "size_over_lifetime": size_curve,
             "color_over_lifetime": color_curve,

@@ -49,7 +49,7 @@
 ## 常用约定
 
 - 运行脚本用 `d:/2/Warpforge_tools/py312/python.exe`（勿用系统 Python 3.14）
-- **战场场景移植（2026-08-22 battlearena1 样板已接入主项目；2026-08-23 用户令暂停战场 3D 场景复刻、场景数据归档）**：主项目 battle.gd `_build_3d_world` 实例化 `res://scenes/unity_arena_<arena>.tscn`（unity_scene_to_godot.py 直出，勿手改生成物——只改生成器源码再重生成；场景自含 MirrorX/相机/Env/LUT）；战场演示项目（13 套场景+工具+截图）已整体归档至 `Warpforge备份/战场演示_暂停归档_0823/`（含 project.godot/tools/渲染截图；12 变体场景切换待做——恢复战场任务时从归档取回）；**黑军团/battlearena1 手性方向问题未决**（阅历见使用地图坑52+任务文件二十轮续5/6——用户裁决"朝向反"、Z 反射数学等价原版但用户目视相反、只翻地面 UV 试验亦未通过——暂停待用户再指示）
+- **战场场景移植（2026-08-22 battlearena1 样板已接入主项目；2026-08-23 用户令暂停战场 3D 场景复刻、场景数据归档）**：主项目 battle.gd `_build_3d_world` 实例化 `res://scenes/unity_arena_<arena>.tscn`（unity_scene_to_godot.py 直出，勿手改生成物——只改生成器源码再重生成；场景自含 Z 反射手性/相机/Env/LUT——26 轮 12 变体已按阵营接线，遗留 battlearena2/3 双相机+坑 90 地面中带）；战场演示项目（13 套场景+工具+截图）已整体归档至 `Warpforge备份/战场演示_暂停归档_0823/`（含 project.godot/tools/渲染截图；12 变体场景切换待做——恢复战场任务时从归档取回）；**手性已终审定案**（25 轮白盒探针：Z 反射=原版权威一致✓，使用地图坑 82 修正；用户目视"翻转"=单位/贴图朝向细节，非世界布局）
 - 卡图/资源路径相对 `d:/2/解包整理/`；卡牌索引 `解包整理/card_index.json`
 - 视觉识别：用户要求看图时，走 vision skill（MCP 调用副模型），主模型无法直接看图
 - **gdmcp（Godot-MCP-Native 2026-08-21 接入，v1.0.8）**：CLI 在 `D:/warpforge/.gdmcp/bin/gdmcp.exe`（skill `gdmcp` 已装 `~/.claude/skills/`）；**前置：Godot 编辑器须打开 D:\warpforge 且 MCP 插件已启用**（项目设置→插件→Godot MCP Native；服务 http://127.0.0.1:9080）。用法：`cd /d/warpforge && MSYS_NO_PATHCONV=1 ./.gdmcp/bin/gdmcp.exe --json <cmd>`（**必须 MSYS_NO_PATHCONV=1**，否则 /root/... 被 Git Bash 转成 C:/Program Files/Git/...）；常用：doctor / scenes current / scenes list / nodes get /root/... --fields ... / scripts read / runtime tree（编辑器播放时查运行时 UI 树）/ editor state；`--allow-open-world` 开运行时/开放世界工具。**编辑器模式下 nodes list 只有场景根节点**（项目 UI 全代码生成，运行时树才有完整 UI）
